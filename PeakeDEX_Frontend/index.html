@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>PeakeDEX</title>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/stoodkev/hive-keychain@master/dist/keychain.min.js"></script>
+    <script src="dex.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body onload="init()">
+    <h1>PeakeDEX</h1>
+    <p>Powered by Hive Keychain & PEK</p>
+
+    <label for="token-select">Select Token:</label>
+    <select id="token-select" onchange="updateOrderbook()">
+        <option value="SWAP.MATIC">SWAP.MATIC</option>
+        <option value="SWAP.LTC">SWAP.LTC</option>
+        <option value="SWAP.HIVE">SWAP.HIVE</option>
+    </select>
+
+    <div id="orderbook">
+        <h3>Order Book (PEK)</h3>
+        <div id="buy-orders"></div>
+        <div id="sell-orders"></div>
+    </div>
+
+    <div id="trade">
+        <h3>Place Order</h3>
+        <input type="text" id="username" placeholder="Your Hive Username"><br>
+        <input type="number" id="quantity" placeholder="Quantity"><br>
+        <input type="number" id="price" placeholder="Price in PEK"><br>
+        <select id="side">
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+        </select><br>
+        <button onclick="placeOrder()">Place Order</button>
+    </div>
+</body>
+</html>

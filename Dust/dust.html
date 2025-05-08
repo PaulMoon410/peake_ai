@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>🧹 PeakeCoin Dust Collector</title>
+    <style>
+        body {
+            background: linear-gradient(135deg, #0d0d0d, #1a1a1a);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #eee;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        h1 {
+            margin-top: 30px;
+            font-size: 2.5em;
+            color: #00c9ff;
+        }
+        p {
+            font-size: 1.2em;
+            margin-bottom: 30px;
+        }
+        #username {
+            padding: 12px;
+            font-size: 1em;
+            width: 300px;
+            border: none;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        button {
+            background-color: #00c9ff;
+            border: none;
+            padding: 15px 30px;
+            font-size: 1.2em;
+            color: #111;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 30px;
+        }
+        button:hover {
+            background-color: #00a7d1;
+        }
+        #log {
+            width: 90%;
+            max-width: 600px;
+            background: #222;
+            border-radius: 10px;
+            padding: 20px;
+            overflow-y: auto;
+            height: 300px;
+        }
+        #progressBar {
+            width: 90%;
+            max-width: 600px;
+            background: #333;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 20px;
+            height: 20px;
+        }
+        #progress {
+            height: 100%;
+            width: 0%;
+            background: #00c9ff;
+            transition: width 0.5s;
+        }
+    </style>
+</head>
+<body>
+    <h1>🧹 PeakeCoin Dust Collector</h1>
+    <p>Sell all tokens and convert to PeakeCoin automatically</p>
+    <input type="text" id="username" placeholder="Enter your Hive username">
+    <br>
+    <button onclick="startDustCollector()">Start Dust Collection</button>
+
+    <div id="progressBar"><div id="progress"></div></div>
+
+    <div id="log"></div>
+
+    <script src="https://cdn.jsdelivr.net/gh/stoodkev/hive-keychain@latest/hive_keychain.js"></script>
+    <script>
+        const API_URL = "https://api.hive-engine.com/rpc/contracts";
+        const PEAKECOIN_SYMBOL = "SWAP.PEAKECOIN";
+        const DUST_THRESHOLD = 0.001;
+
+        function log(message) {
+            const logBox = document.getElementById('log');
+            logBox.innerHTML += `<div>${message}</div>`;
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        async function fetchBalances(username) {
+            const payload = {
+                jsonrpc: "2.0",
+                method: "find",
+                params: {
+                    contract: "tokens",
+                    table: "balances",
+                    query: { account: username },
+                    limit: 1000
+                },
+                id: 1
+            };
+            const res = await fetch(API_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            const json = await res.json();
+            return json.result;
+        }
+
+        async function fetchOrderbookTop(symbol) {
+            const buyPayload = {
+                jsonrpc: "2.0",
+                method: "find",
+                params: {
+                    contract: "market",
+                    table: "buyBook",
+                    query: { symbol: symbol },
+                    limit: 1,
+                    indexes: [{ index: "priceDec", descending: true }]
+                },
+                id: 1
+            };
+            const sellPayload = { ...buyPayload, params: { ...buyPayload.params, table: "sellBook" }, indexes: [{ index: "price", descending: false }] };
+
+            const [buyRes, sellRes] = await Promise.all([
+                fetch(API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(buyPayload) }),
+                fetch(API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(sellPayload) })
+            ]);
+
+            const buyJson = await buyRes.json();
+            const sellJson = await sellRes.json();
+
+            return {
+                highestBid: buyJson.result[0]?.price ? parseFloat(buyJson.result[0].price) : 0,
+                lowestAsk: sellJson.result[0]?.price ? parseFloat(sellJson.result[0].price) : 0
+            };
+        }
+
+        function sendCustomJson(username, payload, message) {
+            hive_keychain.requestCustomJson(
+                username,
+                "ssc-mainnet-hive",
+                "Active",
+                JSON.stringify(payload),
+                message
+            );
+        }
+
+        async function startDustCollector() {
+            const usernameField = document.getElementById('username');
+            const username = usernameField.value.trim();
+            if (!username) {
+                alert("Please enter your Hive username!");
+                return;
+            }
+
+            const balances = await fetchBalances(username);
+            const tokens = balances.filter(b => b.symbol !== PEAKECOIN_SYMBOL && parseFloat(b.balance) > DUST_THRESHOLD);
+            const totalSteps = tokens.length * 2; // Each token: 1 sell + 1 buy
+            let currentStep = 0;
+
+            for (const tokenInfo of tokens) {
+                const token = tokenInfo.symbol;
+                const balance = parseFloat(tokenInfo.balance);
+
+                log(`🔹 Selling ${balance} ${token}...`);
+                const { highestBid } = await fetchOrderbookTop(token);
+
+                if (highestBid > 0) {
+                    const sellPayload = {
+                        contractName: "market",
+                        contractAction: "sell",
+                        contractPayload: {
+                            symbol: token,
+                            quantity: balance.toFixed(8),
+                            price: highestBid.toFixed(8)
+                        }
+                    };
+                    sendCustomJson(username, sellPayload, `Selling ${token}`);
+                    await new Promise(resolve => setTimeout(resolve, 4000));
+                    log(`✅ Sell order sent for ${token}`);
+                } else {
+                    log(`⚠️ No buyers for ${token}, skipping.`);
+                }
+
+                currentStep++;
+                updateProgress(currentStep / totalSteps * 100);
+
+                log(`🟢 Buying PeakeCoin with available SWAP.HIVE...`);
+                const newBalances = await fetchBalances(username);
+                const hiveBalance = parseFloat(newBalances.find(b => b.symbol === "SWAP.HIVE")?.balance || 0);
+
+                if (hiveBalance > DUST_THRESHOLD) {
+                    const { lowestAsk } = await fetchOrderbookTop(PEAKECOIN_SYMBOL);
+                    if (lowestAsk > 0) {
+                        const buyPayload = {
+                            contractName: "market",
+                            contractAction: "buy",
+                            contractPayload: {
+                                symbol: PEAKECOIN_SYMBOL,
+                                quantity: hiveBalance.toFixed(8),
+                                price: lowestAsk.toFixed(8)
+                            }
+                        };
+                        sendCustomJson(username, buyPayload, "Buying PeakeCoin");
+                        log(`✅ Buy order sent`);
+                        await new Promise(resolve => setTimeout(resolve, 4000));
+                    } else {
+                        log(`⚠️ No PeakeCoin available for purchase.`);
+                    }
+                } else {
+                    log(`⚠️ Not enough SWAP.HIVE to buy PeakeCoin.`);
+                }
+
+                currentStep++;
+                updateProgress(currentStep / totalSteps * 100);
+            }
+
+            log("🎯 Dust Collection Complete!");
+        }
+
+        function updateProgress(percent) {
+            document.getElementById('progress').style.width = `${percent}%`;
+        }
+
+        // Optional: Auto-detect logged-in Hive Keychain user
+        window.onload = function () {
+            hive_keychain.requestHandshake(function (response) {
+                if (response.success) {
+                    // If handshake success, Keychain extension is active
+                    console.log("✅ Hive Keychain is ready!");
+                } else {
+                    console.log("⚠️ Hive Keychain not detected!");
+                }
+            });
+        }
+    </script>
+</body>
+</html>

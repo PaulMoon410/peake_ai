@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Peake RPG</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+    #output { white-space: pre-wrap; margin-bottom: 20px; }
+    button { margin: 5px; }
+  </style>
+</head>
+<body>
+
+  <h1>Peake RPG</h1>
+  <div id="output">Thanks for playing!</div>
+  <h3>Game Console</h3>
+  <div id="console" style="background:#222; padding:10px; height:150px; overflow-y:auto; border:1px solid #444; margin-bottom: 20px;"></div>
+  
+  <div>
+    <button onclick="move('n')">North</button>
+    <button onclick="move('s')">South</button>
+    <button onclick="move('e')">East</button>
+    <button onclick="move('w')">West</button>
+    <button onclick="enter()">Enter</button>
+    <button onclick="exitRoom()">Exit</button>
+  
+  </div>
+
+  <h3>Character</h3>
+  <div id="stats"></div>
+
+  <h3>Inventory</h3>
+  <ul id="inventory"></ul>
+
+  <h3>Save / Load</h3>
+  <button onclick="saveGame()">Copy Save Code</button>
+  <button onclick="downloadSave()">Download Save</button>
+  <input type="text" id="loadInput" placeholder="Paste save code" style="width: 300px;">
+  <button onclick="loadGame()">Load</button>
+
+  <h3>Command</h3>
+  <input type="text" id="commandInput" placeholder="Type command..." onkeydown="if(event.key==='Enter') handleCommand()">
+  <button onclick="handleCommand()">Execute</button>
+
+  <div id="shop"></div>
+
+  <script src="maps.js"></script>
+  <script src="/rooms/rooms.js"></script>
+  <script src="characters.js"></script>
+  <script src="shop_items.js"></script>
+  <script src="shop.js"></script>
+  <script src="games.js"></script>
+
+</body>
+</html>

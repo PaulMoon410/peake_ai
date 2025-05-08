@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>PeakeCoin MUD Interface</title>
+  <style>
+    body {
+      font-family: monospace;
+      background: #000;
+      color: #0f0;
+      padding: 1em;
+    }
+    button, input {
+      background: #000;
+      color: #0f0;
+      border: 1px solid #0f0;
+      margin-top: 10px;
+      padding: 5px;
+    }
+  </style>
+</head>
+<body>
+  <h1>PeakeCoin MUD</h1>
+
+  <label>Enter your player name:</label><br>
+  <input id="playerName" placeholder="Player name"><br>
+  <button onclick="loadPlayer()">Load Player</button>
+  <button onclick="savePlayer()">Save Player</button>
+
+  <pre id="output">Waiting for action...</pre>
+
+  <script>
+    let state = { player: "", x: 0, y: 0, inventory: [] };
+
+    async function loadPlayer() {
+      const name = document.getElementById('playerName').value;
+      if (!name) return alert("Please enter a player name.");
+      state.player = name;
+
+      const res = await fetch(`http://192.168.1.204:5000/load/${name}`);
+      const data = await res.json();
+      state = { ...state, ...data };
+      displayState("Loaded");
+    }
+
+    async function savePlayer() {
+      if (!state.player) return alert("Load a player first.");
+      const res = await fetch('http://192.168.1.204:5000/save', {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(state)
+      });
+      const data = await res.json();
+      displayState("Saved");
+    }
+
+    function displayState(action) {
+      document.getElementById("output").textContent = `${action} state for ${state.player}:\nX: ${state.x}, Y: ${state.y}\nInventory: ${state.inventory.join(", ") || "(empty)"}`;
+    }
+  </script>
+
+  <script src="npcs.js"></script>
+  <script src="savegame.js"></script>
+
+</body>
+</html>

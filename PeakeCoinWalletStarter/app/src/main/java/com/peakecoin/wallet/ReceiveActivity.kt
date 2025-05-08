@@ -1,0 +1,1 @@
+// ReceiveActivity.kt placeholder
