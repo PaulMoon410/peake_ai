@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PeakeCoin Let It Ride</title>
+    <link href="casino-theme.css" rel="stylesheet">
+</head>
+<body>
+<div id="main-content" style="display:none;">
+    <div class="game-container">
+        <div class="game-title">PeakeCoin Let It Ride</div>
+        <div id="letitride-table">
+            <label for="letitride-bet">Bet Amount (PEK):</label>
+            <input type="number" id="letitride-bet" min="1" value="1">
+            <div id="letitride-player-cards" class="hand"></div>
+            <div id="letitride-community-cards" class="hand"></div>
+            <div id="letitride-controls">
+                <button id="letitride-deal" class="game-btn">Deal</button>
+                <button id="letitride-pull1" class="game-btn">Pull 1st Bet</button>
+                <button id="letitride-pull2" class="game-btn">Pull 2nd Bet</button>
+            </div>
+            <div id="letitride-result" class="game-messages"></div>
+        </div>
+        <div id="wallet-section" class="balance-display" style="margin-top:18px;">
+            <span id="wallet-address"></span>
+            <span id="wallet-balance"></span>
+        </div>
+    </div>
+</div>
+<script src="./letitride.js"></script>
+</body>
+</html>

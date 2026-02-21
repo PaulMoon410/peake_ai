@@ -1,0 +1,118 @@
+/* PeakeCoin'sino Shared Casino Theme */
+body {
+    background: linear-gradient(135deg, #181818 0%, #232323 100%);
+    color: #fff;
+    font-family: 'Press Start 2P', monospace, monospace;
+    margin: 0;
+    min-height: 100vh;
+}
+.casino-container, .game-container {
+    max-width: 440px;
+    margin: 60px auto;
+    background: linear-gradient(135deg, #232323 60%, #2d1e2f 100%);
+    border-radius: 20px;
+    box-shadow: 0 0 40px #000a, 0 4px 32px #6c3483cc;
+    padding: 36px 28px 32px 28px;
+    text-align: center;
+    border: 2px solid #6c3483;
+}
+.casino-title, .game-title {
+    font-size: 2.2em;
+    margin-bottom: 28px;
+    letter-spacing: 2px;
+    color: #ffd700;
+    text-shadow: 0 2px 8px #6c3483cc, 0 1px 0 #fff2;
+}
+#messages, .game-messages {
+    margin: 18px 0 12px 0;
+    min-height: 24px;
+    font-size: 1.1em;
+    color: #ffd700;
+    text-shadow: 0 1px 4px #6c3483cc;
+}
+button, .game-btn {
+    display: inline-block;
+    margin: 10px 8px;
+    padding: 14px 32px;
+    font-size: 1.1em;
+    background: linear-gradient(90deg, #6c3483 0%, #232323 100%);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px #0006;
+    transition: background 0.2s, transform 0.1s, box-shadow 0.2s, color 0.2s;
+    font-family: inherit;
+    letter-spacing: 1px;
+}
+button:hover, .game-btn:hover {
+    background: linear-gradient(90deg, #8e44ad 0%, #232323 100%);
+    color: #ffd700;
+    transform: translateY(-2px) scale(1.03);
+    box-shadow: 0 6px 16px #6c3483cc;
+}
+input[type="text"], input[type="number"] {
+    padding: 12px;
+    width: 70%;
+    margin: 10px 0 18px 0;
+    border-radius: 8px;
+    border: 1.5px solid #6c3483;
+    background: #181818;
+    color: #fff;
+    font-size: 1em;
+    font-family: inherit;
+    outline: none;
+    box-shadow: 0 1px 6px #6c348344 inset;
+    transition: border 0.2s, box-shadow 0.2s;
+}
+input[type="text"]:focus, input[type="number"]:focus {
+    border: 2px solid #ffd700;
+    box-shadow: 0 2px 12px #ffd70044;
+}
+.card, .game-card {
+    display: inline-block;
+    background: linear-gradient(135deg, #fff 60%, #ffd700 100%);
+    color: #232323;
+    border-radius: 8px;
+    border: 2px solid #6c3483;
+    box-shadow: 0 2px 8px #6c3483cc;
+    font-size: 1.3em;
+    font-family: inherit;
+    margin: 0 4px;
+    padding: 10px 12px;
+    min-width: 36px;
+    min-height: 48px;
+    text-align: center;
+    vertical-align: middle;
+}
+#casinoBalanceDisplay, .balance-display {
+    margin-bottom: 14px;
+    font-size: 1.1em;
+    color: #ffd700;
+    text-shadow: 0 1px 4px #6c3483cc;
+}
+label {
+    color: #ffd700;
+    font-size: 1em;
+    margin-bottom: 6px;
+    display: block;
+}
+@media (max-width: 600px) {
+    .casino-container, .game-container {
+        max-width: 98vw;
+        padding: 18px 2vw 18px 2vw;
+    }
+    .casino-title, .game-title {
+        font-size: 1.2em;
+    }
+    button, .game-btn {
+        font-size: 1em;
+        padding: 10px 0;
+    }
+    .card, .game-card {
+        font-size: 1em;
+        padding: 7px 7px;
+        min-width: 28px;
+        min-height: 36px;
+    }
+}

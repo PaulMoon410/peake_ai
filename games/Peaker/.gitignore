@@ -1,0 +1,18 @@
+# Python and app artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Local payout queue and audit logs
+payout_queue.json
+casino_audit.jsonl
+floor_manager.log
+
+# Local secret key file (do NOT commit)
+pek_key_wif.txt
+
+# VS Code workspace / temp
+*.code-workspace
+.vscode/

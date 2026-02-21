@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PeakeCoin'sino - Texas Hold'em Poker</title>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <link href="./casino-theme.css" rel="stylesheet">
+    <link href="./poker.css" rel="stylesheet">
+</head>
+<body>
+    <a href="../index.html" class="back-btn">← Back to Lobby</a>
+    
+    <div class="game-container">
+        <div class="header">
+            <h1 class="game-title" style="margin: 0; font-size: 1.4em;">♠ Texas Hold'em ♠</h1>
+            <div class="mode-switch" aria-label="Play mode">
+                <span class="badge offline" title="Local front-end only">Local Mode</span>
+            </div>
+        </div>
+
+        <div class="poker-table">
+            <div class="community-cards">
+                <h3>Community Cards</h3>
+                <div id="communityCards" class="cards"></div>
+            </div>
+            
+            <div class="player-area">
+                <div class="player-hand">
+                    <h4>Your Hand</h4>
+                    <div id="playerCards" class="cards"></div>
+                    <div id="handStrength" class="hand-strength">Hand: High Card</div>
+                </div>
+                
+                <div class="player-hand">
+                    <h4>Dealer Hand</h4>
+                    <div id="dealerCards" class="cards"></div>
+                    <div id="dealerStrength" class="hand-strength">Hand: Hidden</div>
+                </div>
+            </div>
+            
+            <div class="pot-info">
+                <div id="currentPhase">Phase: Idle</div>
+                <div class="phase-progress" id="phaseProgress" aria-hidden="true">
+                    <div class="step" data-label="Pre"></div>
+                    <div class="step" data-label="Flop"></div>
+                    <div class="step" data-label="Turn"></div>
+                    <div class="step" data-label="River"></div>
+                    <div class="step" data-label="Show"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="practice-stats" id="practiceStats">
+            <h3 style="margin:6px 0 4px; font-size:.8em; letter-spacing:1px; color:#ffd700;">Session Stats</h3>
+            <div class="stats-row" style="font-size:.65em; display:flex; gap:14px; flex-wrap:wrap; justify-content:center;">
+                <span id="statHands">Hands: 0</span>
+                <span id="statWins">Wins: 0</span>
+                <span id="statLosses">Losses: 0</span>
+                <span id="statTies">Ties: 0</span>
+                <span id="statWinRate">Win%: 0%</span>
+            </div>
+            <div style="text-align:center; margin-top:6px;">
+                <button id="resetStatsBtn" class="game-btn" style="padding:6px 14px; font-size:.55em;">Reset Stats</button>
+            </div>
+        </div>
+
+        <div class="poker-actions">
+            <button id="dealBtn" class="game-btn">Deal</button>
+            <button id="nextBtn" class="game-btn" disabled>Next</button>
+            <button id="foldBtn" class="poker-btn fold" disabled>Fold</button>
+            <button id="newGameBtn" class="game-btn" disabled>New Hand</button>
+        </div>
+
+        <div id="gameStatus" class="status-display" aria-live="polite">
+            Ready. Click DEAL to begin a hand.
+        </div>
+    </div>
+
+    <script src="./holdem.js"></script>
+</body>
+</html>

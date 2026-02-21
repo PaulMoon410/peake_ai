@@ -1,0 +1,153 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Arial', sans-serif;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    color: #fff;
+    min-height: 100vh;
+    padding: 20px;
+}
+
+.casino-container {
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+.casino-header {
+    text-align: center;
+    margin-bottom: 40px;
+    padding: 20px;
+    background: rgba(255, 215, 0, 0.1);
+    border: 2px solid #ffd700;
+    border-radius: 10px;
+}
+
+.casino-header h1 {
+    font-size: 2.5em;
+    color: #ffd700;
+    margin-bottom: 10px;
+    text-shadow: 0 0 20px rgba(255, 215, 0, 0.5);
+}
+
+.casino-header p {
+    font-size: 1.1em;
+    color: #e0e0e0;
+}
+
+.game-area {
+    background: rgba(30, 40, 60, 0.8);
+    border: 2px solid #ffd700;
+    border-radius: 15px;
+    padding: 30px;
+    margin-bottom: 20px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.info-box {
+    background: rgba(255, 215, 0, 0.05);
+    border-left: 4px solid #ffd700;
+    padding: 20px;
+    margin-top: 30px;
+    border-radius: 8px;
+}
+
+.info-box h3 {
+    color: #ffd700;
+    margin-bottom: 10px;
+}
+
+.info-box ul {
+    list-style-position: inside;
+    color: #e0e0e0;
+}
+
+.info-box li {
+    margin: 8px 0;
+}
+
+.casino-footer {
+    text-align: center;
+    padding: 20px;
+    color: #888;
+    font-size: 0.9em;
+}
+
+.input-group {
+    margin: 15px 0;
+}
+
+.input-group label {
+    display: block;
+    margin-bottom: 5px;
+    color: #ffd700;
+    font-weight: bold;
+}
+
+.input-group input, .input-group select {
+    width: 100%;
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid #ffd700;
+    border-radius: 5px;
+    color: #fff;
+    font-size: 1em;
+}
+
+.input-group input:focus, .input-group select:focus {
+    outline: none;
+    background: rgba(255, 255, 255, 0.2);
+    box-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+}
+
+.input-group select option {
+    background: #16213e;
+    color: #fff;
+}
+
+.roll-button, .reset-button {
+    background: linear-gradient(135deg, #ffd700 0%, #ffed4e 100%);
+    color: #000;
+    padding: 15px 40px;
+    border: none;
+    border-radius: 8px;
+    font-size: 1.2em;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    margin-top: 20px;
+    width: 100%;
+}
+
+.roll-button:hover:not(:disabled), .reset-button:hover {
+    transform: scale(1.05);
+    box-shadow: 0 0 20px rgba(255, 215, 0, 0.8);
+}
+
+.roll-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.result-area {
+    text-align: center;
+    padding: 30px;
+    background: rgba(255, 215, 0, 0.1);
+    border: 2px solid #ffd700;
+    border-radius: 10px;
+    margin-top: 20px;
+}
+
+.result-area h2 {
+    font-size: 2em;
+    margin-bottom: 10px;
+}
+
+.result-area p {
+    font-size: 1.2em;
+    margin-bottom: 20px;
+    color: #e0e0e0;
+}

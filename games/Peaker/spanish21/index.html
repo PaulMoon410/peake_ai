@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PeakeCoin Spanish 21</title>
+    <link href="casino-theme.css" rel="stylesheet">
+</head>
+<body>
+<div id="main-content" style="display:none;">
+    <div class="game-container">
+        <div class="game-title">PeakeCoin Spanish 21</div>
+        <div id="spanish21-table">
+            <label for="spanish21-bet">Bet Amount (PEK):</label>
+            <input type="number" id="spanish21-bet" min="0.000001" value="0.000001">
+            <div><b>Your Hand:</b></div>
+            <div class="hand" id="spanish21-player-cards"></div>
+            <div><b>Dealer's Hand:</b></div>
+            <div class="hand" id="spanish21-dealer-cards"></div>
+        </div>
+        <div id="controls">
+            <button id="spanish21-deal" class="game-btn">Deal</button>
+            <button id="spanish21-hit" class="game-btn">Hit</button>
+            <button id="spanish21-stand" class="game-btn">Stand</button>
+            <button id="spanish21-double" class="game-btn">Double</button>
+        </div>
+        <div id="spanish21-result" class="game-messages"></div>
+        <div id="wallet-section" class="balance-display" style="margin-top:18px;">
+            <span id="wallet-address"></span>
+            <span id="wallet-balance"></span>
+        </div>
+    </div>
+</div>
+<script src="./spanish21.js"></script>
+</body>
+</html>

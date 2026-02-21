@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PeakeCoin'sino - Betting Desk</title>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <link href="../casino-theme.css" rel="stylesheet">
+    <style>
+        body {
+            background: radial-gradient(circle at 20% 20%, #2a1f3c 0%, #161616 38%, #0f0f0f 72%);
+            color: #fff;
+            font-family: 'Press Start 2P', monospace;
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 12px;
+        }
+        .desk-card {
+            width: 100%;
+            max-width: 720px;
+            background: linear-gradient(135deg, #1f1f1f 0%, #241827 60%, #1a1a1a 100%);
+            border: 2px solid #ffd700;
+            border-radius: 16px;
+            box-shadow: 0 8px 28px #000c;
+            padding: 26px 22px;
+        }
+        .desk-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+        .desk-title {
+            font-size: 1.3em;
+            letter-spacing: 2px;
+            color: #ffd700;
+            text-shadow: 0 3px 10px #6c3483aa;
+            margin: 0;
+        }
+        .back-link {
+            text-decoration: none;
+            color: #ffd700;
+            font-size: 0.8em;
+            border: 1px solid #6c3483;
+            padding: 10px 14px;
+            border-radius: 10px;
+            background: #141414;
+            box-shadow: 0 2px 10px #0008;
+        }
+        .panel {
+            background: #161616;
+            border: 1px solid #2f1f32;
+            border-radius: 12px;
+            padding: 16px 14px;
+            margin-bottom: 14px;
+            box-shadow: 0 2px 12px #0008 inset;
+        }
+        .panel h3 {
+            margin: 0 0 10px 0;
+            color: #ffd700;
+            font-size: 0.95em;
+        }
+        label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 0.9em;
+        }
+        input[type="text"], input[type="number"], textarea {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 12px;
+            border-radius: 10px;
+            border: 1.5px solid #6c3483;
+            background: #0f0f0f;
+            color: #fff;
+            font-size: 1em;
+            font-family: inherit;
+            outline: none;
+            box-shadow: 0 1px 6px #6c348344 inset;
+            transition: border 0.2s, box-shadow 0.2s;
+        }
+        input:focus, textarea:focus {
+            border: 2px solid #ffd700;
+            box-shadow: 0 2px 12px #ffd70044;
+        }
+        textarea { resize: vertical; min-height: 70px; }
+        .btn {
+            width: 100%;
+            padding: 14px;
+            margin-top: 10px;
+            border: none;
+            border-radius: 10px;
+            background: linear-gradient(90deg, #ffd700 0%, #6c3483 100%);
+            color: #232323;
+            font-weight: bold;
+            font-family: inherit;
+            cursor: pointer;
+            box-shadow: 0 2px 10px #0008;
+            transition: background 0.2s, box-shadow 0.2s, transform 0.1s;
+        }
+        .btn:hover { background: linear-gradient(90deg, #fff700 0%, #8e44ad 100%); box-shadow: 0 6px 18px #ffd70055; transform: translateY(-1px); }
+        .status {
+            min-height: 22px;
+            margin-top: 8px;
+            color: #ffd700;
+            font-size: 0.9em;
+        }
+        .inline { display: flex; gap: 12px; flex-wrap: wrap; }
+        .inline .field { flex: 1 1 220px; }
+        .badge {
+            display: inline-block;
+            padding: 6px 10px;
+            border-radius: 8px;
+            background: #6c3483;
+            color: #ffd700;
+            font-size: 0.75em;
+            margin-left: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="desk-card">
+        <div class="desk-header">
+            <h1 class="desk-title">Betting Desk</h1>
+            <a class="back-link" href="../index.html">← Back to Lobby</a>
+        </div>
+
+        <div class="panel" id="authPanel">
+            <h3>Sign In <span class="badge">Hive Keychain</span></h3>
+            <div class="inline">
+                <div class="field">
+                    <label for="usernameInput">Hive username</label>
+                    <input type="text" id="usernameInput" placeholder="yourname" autocomplete="username">
+                </div>
+                <div class="field">
+                    <label for="balanceDisplay">PEK Balance</label>
+                    <input type="text" id="balanceDisplay" value="—" disabled>
+                </div>
+            </div>
+            <button class="btn" id="loginBtn" type="button">Sign & Restore Session</button>
+            <div class="status" id="loginStatus"></div>
+        </div>
+
+        <div class="panel" id="betPanel">
+            <h3>Place a Bet</h3>
+            <div class="inline">
+                <div class="field">
+                    <label for="fromInput">From (your Hive)</label>
+                    <input type="text" id="fromInput" placeholder="hiveuser" autocomplete="username">
+                </div>
+                <div class="field">
+                    <label for="toInput">To (casino)</label>
+                    <input type="text" id="toInput" value="peakecoin.matic">
+                </div>
+            </div>
+            <div class="inline">
+                <div class="field">
+                    <label for="amountInput">Amount (PEK)</label>
+                    <input type="number" id="amountInput" min="0.00000001" step="0.00000001" placeholder="10">
+                </div>
+                <div class="field">
+                    <label for="memoInput">Memo (optional)</label>
+                    <input type="text" id="memoInput" placeholder="Game / table / note">
+                </div>
+            </div>
+            <textarea id="detailsInput" placeholder="Extra details (optional)"></textarea>
+            <button class="btn" id="placeBetBtn" type="button">Place Bet via Hive Keychain</button>
+            <div class="status" id="betStatus"></div>
+        </div>
+
+        <div class="panel">
+            <h3>How it works</h3>
+            <ul style="margin: 0 0 0 18px; padding: 0; line-height: 1.5;">
+                <li>Sign in with Hive Keychain to load your username and balance.</li>
+                <li>Bets use Hive Engine custom_json to transfer PEK to the house.</li>
+                <li>TXIDs are shown after Hive Keychain broadcasts the transaction.</li>
+                <li>Use memo/details to tag the game round for easier reconciliation.</li>
+            </ul>
+        </div>
+    </div>
+
+    <script src="../session.js"></script>
+    <script src="../betting_logic.js"></script>
+    <script>
+        const API_ENDPOINTS = [
+            'http://74.208.146.37/peksino',
+            'https://api.hive-engine.com/rpc/contracts'
+        ];
+
+        let currentUser = null;
+
+        const usernameInput = document.getElementById('usernameInput');
+        const fromInput = document.getElementById('fromInput');
+        const toInput = document.getElementById('toInput');
+        const amountInput = document.getElementById('amountInput');
+        const memoInput = document.getElementById('memoInput');
+        const detailsInput = document.getElementById('detailsInput');
+        const loginStatus = document.getElementById('loginStatus');
+        const betStatus = document.getElementById('betStatus');
+        const balanceDisplay = document.getElementById('balanceDisplay');
+
+        function setUser(user) {
+            currentUser = user;
+            try { localStorage.setItem('peakecoin_user', user); localStorage.setItem('hive_user', user); } catch (e) {}
+            usernameInput.value = user;
+            fromInput.value = user;
+        }
+
+        async function fetchBalance(user) {
+            balanceDisplay.value = 'Loading...';
+            for (const endpoint of API_ENDPOINTS) {
+                try {
+                    if (endpoint.includes('peksino')) {
+                        const r = await fetch(`${endpoint}/balance/${user}`);
+                        if (!r.ok) continue;
+                        const data = await r.json();
+                        if (data && data.balance) {
+                            balanceDisplay.value = `${parseFloat(data.balance).toFixed(3)} PEK`;
+                            return;
+                        }
+                    } else {
+                        const reqBody = {
+                            jsonrpc: '2.0',
+                            id: 1,
+                            method: 'find',
+                            params: { contract: 'tokens', table: 'balances', query: { account: user, symbol: 'PEK' }, limit: 1 }
+                        };
+                        const r = await fetch(endpoint, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(reqBody)
+                        });
+                        if (!r.ok) continue;
+                        const data = await r.json();
+                        if (data?.result?.[0]?.balance) {
+                            balanceDisplay.value = `${parseFloat(data.result[0].balance).toFixed(3)} PEK`;
+                            return;
+                        }
+                    }
+                } catch (e) {
+                    continue;
+                }
+            }
+            balanceDisplay.value = 'Unavailable';
+        }
+
+        document.getElementById('loginBtn').addEventListener('click', () => {
+            const requestedUser = usernameInput.value.trim();
+            if (!window.hive_keychain) {
+                loginStatus.textContent = 'Hive Keychain extension is required.';
+                return;
+            }
+            const target = requestedUser || null;
+            loginStatus.textContent = 'Requesting signature...';
+            window.hive_keychain.requestSignBuffer(
+                target,
+                'Login to PeakeCoin Betting Desk',
+                'Posting',
+                function(response) {
+                    if (response.success) {
+                        const user = response.data?.username || target || '';
+                        if (!user) {
+                            loginStatus.textContent = 'Login succeeded but username not detected.';
+                            return;
+                        }
+                        setUser(user);
+                        fetchBalance(user);
+                        loginStatus.textContent = 'Session restored. Ready to bet.';
+                    } else {
+                        loginStatus.textContent = 'Login failed or cancelled.';
+                    }
+                }
+            );
+        });
+
+        document.getElementById('placeBetBtn').addEventListener('click', () => {
+            if (!window.hive_keychain) {
+                betStatus.textContent = 'Hive Keychain extension is required.';
+                return;
+            }
+            const from = (fromInput.value || '').trim();
+            const to = (toInput.value || '').trim();
+            const amount = parseFloat(amountInput.value);
+            const memo = memoInput.value || '';
+            const extra = detailsInput.value || '';
+
+            if (!from) {
+                betStatus.textContent = 'Enter your Hive username.';
+                return;
+            }
+            if (!to) {
+                betStatus.textContent = 'Destination account is required.';
+                return;
+            }
+            if (!amount || amount <= 0) {
+                betStatus.textContent = 'Enter a PEK amount greater than 0.';
+                return;
+            }
+
+            const combinedMemo = extra ? `${memo} | ${extra}` : memo;
+            betStatus.textContent = 'Requesting Keychain...';
+            placeBet(from, to, amount, combinedMemo, (response) => {
+                if (response?.success) {
+                    betStatus.textContent = 'Bet broadcast. TXID: ' + (response.result?.id || 'pending');
+                    fetchBalance(from);
+                } else {
+                    betStatus.textContent = 'Bet failed or rejected.';
+                }
+            });
+        });
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const saved = getLoggedInUser();
+            if (saved) {
+                setUser(saved);
+                fetchBalance(saved);
+                loginStatus.textContent = 'Session restored from local storage.';
+            }
+        });
+    </script>
+</body>
+</html>
