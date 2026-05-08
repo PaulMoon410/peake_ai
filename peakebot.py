@@ -811,10 +811,43 @@ def remember(prompt, response):
     generate_webpage(memory[-50:])
 
 def generate_response(prompt):
-    """Generate response using language model, memory, and web search"""
+    """Generate response using direct Q&A, memory, and web search"""
+    pl = prompt.lower().strip()
+    
+    # DIRECT Q&A LAYER: Handle common questions directly instead of pattern matching
+    # This ensures responsive, contextual answers
+    affirmative_responses = [
+        "Yes, absolutely!",
+        "Of course!",
+        "Definitely!",
+        "You bet!",
+        "Totally!"
+    ]
+    
+    # Handle yes/no questions
+    if any(q in pl for q in ["can i ask", "can you help", "are you there", "are you working", "do you work"]):
+        return affirmative_responses[hash(prompt) % len(affirmative_responses)]
+    
+    if any(q in pl for q in ["do you understand", "do you get it", "are you listening", "hear me"]):
+        return "Yes, I understand you. Each conversation helps me learn better. Please continue!"
+    
+    if any(q in pl for q in ["why aren't you", "why don't you", "not answering", "not responding"]):
+        return "I apologize for any confusion. I'm here and ready to help. What would you like to know?"
+    
+    if any(q in pl for q in ["what are you", "who are you", "your name", "call you"]):
+        return "I'm PeakeBot, an AI assistant built on Hive. I search the web, learn from conversations, and help with questions about cryptocurrency, Hive, and many other topics."
+    
+    if any(q in pl for q in ["hello", "hi ", "hey "]):
+        return "Hello! Welcome to PeakeBot. How can I help you today?"
+    
+    if any(q in pl for q in ["thanks", "thank you", "appreciate"]):
+        return "You're welcome! Happy to help. Feel free to ask me anything else."
+    
+    if any(q in pl for q in ["how are you", "how do you feel", "you okay"]):
+        return "I'm doing well, thank you for asking! I'm ready to assist and learn from you."
+    
     # Check if user is asking for web search or included a URL/domain
-    pl = prompt.lower()
-    web_trigger = any(phrase in pl for phrase in ["search", "look up", "find out", "what is", "who is", "when did", "how do"]) or bool(_extract_url_candidate(pl))
+    web_trigger = any(phrase in pl for phrase in ["search", "look up", "find out", "what is", "who is", "when did", "how do", "tell me about", "explain"]) or bool(_extract_url_candidate(pl))
     
     # Build context from memory
     memory_snippets = fetch_all_ftp_memory()
@@ -822,7 +855,7 @@ def generate_response(prompt):
     # PRIORITY 1: Check for exact/similar past responses (trained knowledge retention)
     exact_match = None
     for m in reversed(memory_snippets):
-        if m["prompt"].lower().strip() == pl.strip():
+        if m["prompt"].lower().strip() == pl:
             exact_match = m["response"]
             break
     
@@ -859,15 +892,16 @@ def generate_response(prompt):
             
             # Use gathered info as context for conversation
             web_context = web_info
+            # Return web results if available (they're already formatted with verification)
+            if web_context:
+                remember(prompt, web_context)
+                return web_context
     
     # Build rich context for the model
     full_context = "SYSTEM: You are PeakeBot, a helpful and friendly AI assistant. You are knowledgeable about Hive, cryptocurrency, and many topics. Be conversational, warm, and remember what you've learned. Keep responses concise but informative.\n\n"
     
     if memory_context:
         full_context += "📚 PAST INTERACTIONS:\n" + memory_context + "\n\n"
-    if web_context:
-        full_context += "🌐 RECENT GATHERED KNOWLEDGE:\n" + web_context + "\n"
-        full_context += "Use only [verified] entries for confident claims. For [unverified] entries, clearly mark uncertainty and invite verification.\n\n"
     
     full_context += f"USER: {prompt}\nPeakeBot:"
     
@@ -875,19 +909,20 @@ def generate_response(prompt):
     try:
         response = model.generate_response(full_context, max_length=200)
         if not response or response.strip() == "" or response == "PeakeBot:":
-            response = "I'm processing that... let me think about it for a moment."
+            # Fallback for open-ended questions
+            response = f"That's an interesting question about '{prompt}'. I'm learning more about that topic. Feel free to tell me more or ask something else!"
             # Queue this topic for autonomous learning
             keywords = re.findall(r"\b[a-z]{4,}\b", prompt.lower())
             if keywords:
                 add_to_learning_queue(keywords[0])
     except Exception as e:
         print(f"⚠️ Model error: {str(e)}")
-        response = "I encountered an issue generating a response, but I'm learning!"
+        response = "I encountered an issue generating a response, but I'm learning! Can you rephrase that?"
     
     # Clean up response if it contains system artifacts
     response = response.replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
     if not response:
-        response = "I'm still learning about that topic!"
+        response = "I'm learning about that. Tell me more?"
     
     # Remember this interaction
     remember(prompt, response)
