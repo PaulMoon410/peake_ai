@@ -24,10 +24,6 @@ except Exception:
     BeemAccount = None
     BeemNodeList = None
 
-# Load the language model
-model = NeuralLanguageModel()
-model.load_model("language_model.pkl")
-
 HISTORY_FILE = "peakebot_memory.json"
 KEY_FILE = "hive_keys.json"
 FTP_HOST = "<REDACTED_FTP_HOST>"
@@ -49,6 +45,32 @@ VERIFICATION_STOPWORDS = {
     "this", "those", "very", "what", "when", "where", "with", "would", "your",
     "while", "which", "could", "should", "will", "just", "than", "then"
 }
+
+
+def _initialize_language_model() -> NeuralLanguageModel:
+    model = NeuralLanguageModel()
+    if model.load_model("language_model.pkl"):
+        return model
+
+    # Render deploys may not include a pre-trained pickle. Bootstrap a small usable model.
+    try:
+        bootstrap_texts = [
+            "Hello, how can I help you today?",
+            "I am PeakeBot, a helpful AI assistant.",
+            "I can search for information and summarize what I find.",
+            "Please ask me a question and I will do my best to help.",
+            "I am still learning and may need to verify uncertain information.",
+        ]
+        model.build_vocabulary(bootstrap_texts)
+        model.train_on_text(bootstrap_texts, epochs=1)
+        print("⚠️ language_model.pkl not found; bootstrapped a minimal model for startup")
+    except Exception as e:
+        print(f"⚠️ Failed to bootstrap fallback language model: {str(e)}")
+    return model
+
+
+# Load the language model
+model = _initialize_language_model()
 
 
 def _tmp_path(filename: str) -> str:

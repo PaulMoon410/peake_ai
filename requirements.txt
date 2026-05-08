@@ -1,5 +1,6 @@
 requests>=2.31.0
 beautifulsoup4>=4.12.0
+numpy>=1.26.0
 hive-nectar>=0.2.15
 beem>=0.24.26
 flask>=3.0.0
