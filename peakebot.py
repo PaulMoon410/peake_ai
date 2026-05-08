@@ -39,6 +39,11 @@ VERIFICATION_MIN_SHARED_TOKENS = 4
 MIN_HIVE_AUTHOR_REPUTATION = 50.0
 MIN_LEARNING_CONFIDENCE = 0.6
 HIVE_BACKEND = "nectar" if NectarHive is not None else ("beem" if BeemHive is not None else "none")
+FETCHAI_ENABLED = os.getenv("FETCHAI_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+FETCHAI_API_URL = os.getenv("FETCHAI_API_URL", "").strip()
+FETCHAI_API_KEY = os.getenv("FETCHAI_API_KEY", "").strip()
+FETCHAI_TIMEOUT_SECONDS = int(os.getenv("FETCHAI_TIMEOUT_SECONDS", "20"))
+FETCHAI_SELF_IMPROVE_TOPICS = int(os.getenv("FETCHAI_SELF_IMPROVE_TOPICS", "5"))
 VERIFICATION_STOPWORDS = {
     "about", "after", "again", "also", "and", "been", "being", "from", "have",
     "into", "more", "most", "only", "that", "their", "there", "these", "they",
@@ -135,6 +140,118 @@ def _source_reliability_weight(source: str) -> float:
         "url": 0.70,            # Direct URL fetch
     }
     return source_weights.get(source, 0.6)
+
+
+def _fetchai_generate_response(prompt: str, memory_context: str = "", web_context: str = "") -> str:
+    """Optional Fetch.ai HTTP integration. Returns empty string on any failure."""
+    if not FETCHAI_ENABLED or not FETCHAI_API_URL:
+        return ""
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if FETCHAI_API_KEY:
+        headers["Authorization"] = f"Bearer {FETCHAI_API_KEY}"
+
+    payload = {
+        "prompt": prompt,
+        "context": {
+            "memory": memory_context,
+            "web": web_context,
+        },
+    }
+
+    try:
+        res = requests.post(
+            FETCHAI_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=FETCHAI_TIMEOUT_SECONDS,
+        )
+        if res.status_code < 200 or res.status_code >= 300:
+            print(f"⚠️ Fetch.ai request failed with status {res.status_code}")
+            return ""
+
+        content_type = (res.headers.get("content-type") or "").lower()
+        if "application/json" in content_type:
+            data = res.json()
+            if isinstance(data, dict):
+                for key in ["response", "answer", "output", "message", "text"]:
+                    value = data.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+                return ""
+            return str(data).strip()
+
+        # Plain text fallback
+        return (res.text or "").strip()
+    except Exception as e:
+        print(f"⚠️ Fetch.ai call failed: {str(e)}")
+        return ""
+
+
+def _extract_topics_from_fetchai(text: str, max_topics: int = 5) -> list:
+    """Parse a robust topic list from Fetch.ai text or JSON-like output."""
+    if not text:
+        return []
+
+    candidates = []
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            candidates.extend([str(x).strip() for x in data if str(x).strip()])
+        elif isinstance(data, dict):
+            items = data.get("topics") or data.get("suggestions") or data.get("items") or []
+            if isinstance(items, list):
+                candidates.extend([str(x).strip() for x in items if str(x).strip()])
+    except Exception:
+        pass
+
+    # Fallback: parse lines or numbered/bulleted output.
+    if not candidates:
+        for line in text.splitlines():
+            cleaned = re.sub(r"^\s*(?:[-*]|\d+[\.)])\s*", "", line).strip()
+            if cleaned and len(cleaned) >= 4:
+                candidates.append(cleaned)
+
+    seen = set()
+    topics = []
+    for c in candidates:
+        normalized = re.sub(r"\s+", " ", c).strip(" .")
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        topics.append(normalized)
+        if len(topics) >= max_topics:
+            break
+    return topics
+
+
+def _fetchai_suggest_learning_topics(memory_snippets: list, max_topics: int = FETCHAI_SELF_IMPROVE_TOPICS) -> list:
+    """Ask Fetch.ai what PeakeBot should learn next from recent interactions."""
+    if not FETCHAI_ENABLED:
+        return []
+
+    recent = memory_snippets[-12:] if memory_snippets else []
+    recent_text = "\n".join(
+        f"- user: {m.get('prompt', '')}\n  bot: {m.get('response', '')}"
+        for m in recent
+    )
+
+    prompt = (
+        "You are helping an autonomous AI improve itself. "
+        f"From these recent interactions, suggest exactly {max_topics} concise learning topics "
+        "that will most improve future answers. Return ONLY a JSON object: "
+        '{"topics": ["topic 1", "topic 2"]}.\n\n'
+        f"Recent interactions:\n{recent_text}"
+    )
+
+    response_text = _fetchai_generate_response(prompt, memory_context=recent_text)
+    return _extract_topics_from_fetchai(response_text, max_topics=max_topics)
 
 
 def _hive_reputation_to_score(raw_reputation) -> float:
@@ -439,6 +556,26 @@ def process_learning_queue(max_topics: int = 3):
         
         with open(LEARNED_TOPICS_FILE, "r") as f:
             learned_data = json.load(f)
+
+        # Let Fetch.ai suggest next learning targets from recent history.
+        memory_snippets = fetch_all_ftp_memory()
+        suggested_topics = _fetchai_suggest_learning_topics(memory_snippets, max_topics=FETCHAI_SELF_IMPROVE_TOPICS)
+        if suggested_topics:
+            learned_topic_names = {
+                str(t.get("topic", "")).lower().strip()
+                for t in learned_data.get("topics", [])
+                if isinstance(t, dict)
+            }
+            queue_lower = {str(t).lower().strip() for t in queue}
+            added = 0
+            for topic in suggested_topics:
+                tk = topic.lower().strip()
+                if tk and tk not in learned_topic_names and tk not in queue_lower:
+                    queue.append(topic)
+                    queue_lower.add(tk)
+                    added += 1
+            if added:
+                print(f"🤖 Fetch.ai added {added} self-improvement topic(s) to the learning queue")
         
         if not queue:
             print("💤 Learning queue empty")
@@ -904,6 +1041,12 @@ def generate_response(prompt):
         full_context += "📚 PAST INTERACTIONS:\n" + memory_context + "\n\n"
     
     full_context += f"USER: {prompt}\nPeakeBot:"
+
+    # PRIORITY 4: Optional Fetch.ai provider (if configured)
+    fetchai_reply = _fetchai_generate_response(prompt, memory_context=memory_context, web_context=web_context)
+    if fetchai_reply:
+        remember(prompt, fetchai_reply)
+        return fetchai_reply
     
     # Generate a conversational response using the language model
     try:
@@ -1055,7 +1198,7 @@ def generate_webpage(entries):
 
 def interactive_loop():
     print("🧠 PeakeBot ready. Type your message below:")
-    print("Commands: 'train' to teach new responses, 'learn' to process learning queue, 'queue [topic]' to add topic, 'save' to save learning, 'exit' to quit\n")
+    print("Commands: 'train' to teach new responses, 'learn' to process learning queue (and Fetch.ai self-suggestions if enabled), 'queue [topic]' to add topic, 'save' to save learning, 'exit' to quit\n")
     training_mode = False
     
     while True:
