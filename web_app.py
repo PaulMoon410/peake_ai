@@ -361,35 +361,6 @@ def admin_index() -> Response:
       </div>
 
       <div class=\"card\">
-<<<<<<< HEAD
-=======
-        <h3>FTP Settings</h3>
-        <div class=\"row\">
-          <label>FTP Host</label>
-          <input id=\"ftpHost\" placeholder=\"ftp.example.com\" />
-        </div>
-        <div class=\"row\">
-          <label>FTP User</label>
-          <input id=\"ftpUser\" placeholder=\"username\" />
-        </div>
-        <div class=\"row\">
-          <label>FTP Password</label>
-          <input id=\"ftpPass\" type=\"password\" placeholder=\"Leave blank to keep current\" />
-        </div>
-        <div class=\"row\">
-          <label>FTP Base Dir / URL Path</label>
-          <input id=\"ftpBaseDir\" placeholder=\"/peakecoin/ai or https://geocities.ws/peakecoin/ai\" />
-        </div>
-        <div class=\"row\">
-          <label>FTP Batch Size</label>
-          <input id=\"ftpBatchSize\" type=\"number\" min=\"1\" max=\"1000\" placeholder=\"3\" />
-        </div>
-        <button id=\"loadFtpConfig\">Load FTP Config</button>
-        <button id=\"saveFtpConfig\">Save FTP Config</button>
-      </div>
-
-      <div class=\"card\">
->>>>>>> c6dbed5 (Normalize FTP base dir to target Geocities subdirectory)
         <h3>Status</h3>
         <button id=\"refreshStatus\">Refresh Status</button>
         <button id=\"ftpStatus\">FTP Status</button>
