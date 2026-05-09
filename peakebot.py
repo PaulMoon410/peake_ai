@@ -107,6 +107,16 @@ BASIC_INTERACTIONS = [
         "patterns": ["what time", "what is the time", "time", "current time", "whats the time"],
         "response": None,  # Special handler will compute the time
     },
+    {
+        "name": "learning_capability",
+        "patterns": ["saving", "you learning", "are you learning", "can you learn", "remember", "saved", "remember me"],
+        "response": "Yes, I learn from our conversations and save them to persistent memory. I can remember interactions, recognize patterns, and improve my responses over time through autonomous research and domain-specific learning.",
+    },
+    {
+        "name": "casual_acknowledgment",
+        "patterns": ["weird", "cool", "interesting", "okay", "ok", "i see", "right", "sure", "got it", "makes sense"],
+        "responses": ["I understand.", "Got it.", "Interesting observation.", "Thanks for the feedback.", "I agree."],
+    },
 ]
 
 COMMON_TEXT_NORMALIZATIONS = {
@@ -123,6 +133,17 @@ COMMON_TEXT_NORMALIZATIONS = {
     "wanna": "want to",
     "gonna": "going to",
     "teh": "the",
+    "whats": "what is",
+    "thats": "that is",
+    "heres": "here is",
+    "ive": "i have",
+    "youve": "you have",
+    "havent": "have not",
+    "isnt": "is not",
+    "arent": "are not",
+    "shouldnt": "should not",
+    "couldnt": "could not",
+    "wouldnt": "would not",
 }
 
 ENGLISH_HINT_WORDS = {
@@ -267,6 +288,11 @@ def _is_probably_english(text: str) -> bool:
         return True
     # Permit only short common-English chats when there are no hint-word matches.
     if len(tokens) <= 3 and any(t in SHORT_ENGLISH_ALLOWED for t in tokens):
+        return True
+    # Check if tokens after normalization contain English hint words
+    normalized = _normalize_user_text(text)
+    normalized_tokens = set(re.findall(r"[a-zA-Z]+", normalized.lower()))
+    if any(t in ENGLISH_HINT_WORDS for t in normalized_tokens):
         return True
     return False
 
