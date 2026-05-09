@@ -565,11 +565,26 @@ def queue_learning_topic(topic: str):
 def get_growth_snapshot() -> dict:
     profile = _load_json_file(GROWTH_PROFILE_FILE, _default_growth_profile())
     buffer_data = _load_json_file(ONLINE_LEARNING_BUFFER_FILE, {"items": []})
-    pending = len(buffer_data.get("items", [])) if isinstance(buffer_data, dict) else 0
+    pending_learning = len(buffer_data.get("items", [])) if isinstance(buffer_data, dict) else 0
+    pending_ftp = len(_FTP_PENDING_ENTRIES)
     return {
         "growth_profile": profile,
-        "pending_online_learning_items": pending,
+        "pending_online_learning_items": pending_learning,
+        "pending_ftp_uploads": pending_ftp,
+        "ftp_batch_size": FTP_UPLOAD_BATCH_SIZE,
         "knowledge_override_count": len(_BASE_KNOWLEDGE_OVERRIDES),
+    }
+
+
+def get_ftp_status() -> dict:
+    """Get detailed FTP sync status."""
+    return {
+        "pending_uploads": len(_FTP_PENDING_ENTRIES),
+        "batch_size": FTP_UPLOAD_BATCH_SIZE,
+        "threshold_for_auto_flush": max(1, FTP_UPLOAD_BATCH_SIZE),
+        "ftp_configured": bool(FTP_HOST and FTP_USER and FTP_PASS),
+        "will_auto_flush_at": f"{max(1, FTP_UPLOAD_BATCH_SIZE)} entries",
+        "status": "ready" if FTP_HOST and FTP_USER and FTP_PASS else "not configured",
     }
 
 

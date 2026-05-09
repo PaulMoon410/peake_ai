@@ -11,6 +11,7 @@ from peakebot import (
   list_base_knowledge_entries,
   queue_learning_topic,
   get_growth_snapshot,
+  get_ftp_status,
   flush_sync_tasks,
 )
 
@@ -362,6 +363,7 @@ def admin_index() -> Response:
       <div class=\"card\">
         <h3>Status</h3>
         <button id=\"refreshStatus\">Refresh Status</button>
+        <button id=\"ftpStatus\">FTP Status</button>
         <button id=\"listKnowledge\">List Knowledge</button>
         <pre id=\"output\">Ready.</pre>
       </div>
@@ -461,6 +463,15 @@ def admin_index() -> Response:
         show('Error: ' + e.message);
       }
     };
+
+      document.getElementById('ftpStatus').onclick = async () => {
+        try {
+          const data = await api('/api/admin/ftp-status');
+          show(data);
+        } catch (e) {
+          show('Error: ' + e.message);
+        }
+      };
   </script>
 </body>
 </html>
@@ -548,6 +559,19 @@ def admin_flush_sync() -> Response:
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
     return jsonify({"ok": True, "message": "sync tasks flushed"})
+
+
+@app.get("/api/admin/ftp-status")
+def admin_ftp_status() -> Response:
+    ok, error = _admin_enabled_and_configured()
+    if not ok:
+        return error, 503
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_admin_rate_limit(client_ip):
+        return jsonify({"error": "admin rate limit exceeded"}), 429
+    if not _is_admin_authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    return jsonify(get_ftp_status())
 
 
 @app.post("/api/chat")
