@@ -1,6 +1,8 @@
 import json
 import os
 import time
+import threading
+import queue as queue_mod
 from datetime import datetime
 from ftplib import FTP
 import re
@@ -44,12 +46,107 @@ FETCHAI_API_URL = os.getenv("FETCHAI_API_URL", "").strip()
 FETCHAI_API_KEY = os.getenv("FETCHAI_API_KEY", "").strip()
 FETCHAI_TIMEOUT_SECONDS = int(os.getenv("FETCHAI_TIMEOUT_SECONDS", "20"))
 FETCHAI_SELF_IMPROVE_TOPICS = int(os.getenv("FETCHAI_SELF_IMPROVE_TOPICS", "5"))
+BACKGROUND_RESEARCH_ENABLED = os.getenv("BACKGROUND_RESEARCH_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+BACKGROUND_RESEARCH_MAX_QUEUE = int(os.getenv("BACKGROUND_RESEARCH_MAX_QUEUE", "100"))
 VERIFICATION_STOPWORDS = {
     "about", "after", "again", "also", "and", "been", "being", "from", "have",
     "into", "more", "most", "only", "that", "their", "there", "these", "they",
     "this", "those", "very", "what", "when", "where", "with", "would", "your",
     "while", "which", "could", "should", "will", "just", "than", "then"
 }
+
+# Basic interaction intents and response templates.
+BASIC_INTERACTIONS = [
+    {
+        "name": "help_affirm",
+        "patterns": ["can i ask", "can you help", "are you there", "are you working", "do you work"],
+        "responses": ["Yes, absolutely!", "Of course!", "Definitely!", "You bet!", "Totally!"],
+    },
+    {
+        "name": "understanding",
+        "patterns": ["do you understand", "do you get it", "are you listening", "hear me"],
+        "response": "Yes, I understand you. Please continue.",
+    },
+    {
+        "name": "awareness",
+        "patterns": ["are you aware", "you aware", "are you conscious", "are you self aware"],
+        "response": "I am aware of this conversation and your messages in real time. I can understand context and respond helpfully.",
+    },
+    {
+        "name": "conversation",
+        "patterns": ["can we hold a conversation", "can we talk", "can we have a conversation"],
+        "response": "Absolutely. We can have a real back-and-forth conversation. Ask me anything.",
+    },
+    {
+        "name": "not_answering",
+        "patterns": ["why arent you", "why aren't you", "why dont you", "why don't you", "not answering", "not responding"],
+        "response": "I apologize for the confusion. I am here and ready to help. What would you like to know?",
+    },
+    {
+        "name": "identity",
+        "patterns": ["what are you", "who are you", "your name", "call you"],
+        "response": "I am PeakeBot, an AI assistant. I can chat, learn from interactions, and search when you explicitly ask.",
+    },
+    {
+        "name": "greeting",
+        "patterns": ["hello", "hi", "hey", "greetings"],
+        "response": "Hello! Welcome to PeakeBot. How can I help you today?",
+    },
+    {
+        "name": "thanks",
+        "patterns": ["thanks", "thank you", "appreciate"],
+        "response": "You are welcome. Happy to help.",
+    },
+    {
+        "name": "status",
+        "patterns": ["how are you", "how do you feel", "you okay"],
+        "response": "I am doing well and ready to assist.",
+    },
+]
+
+COMMON_TEXT_NORMALIZATIONS = {
+    "u": "you",
+    "ur": "your",
+    "r": "are",
+    "pls": "please",
+    "plz": "please",
+    "im": "i am",
+    "cant": "cannot",
+    "wont": "will not",
+    "dont": "do not",
+    "idk": "i do not know",
+    "wanna": "want to",
+    "gonna": "going to",
+    "teh": "the",
+}
+
+ENGLISH_HINT_WORDS = {
+    "the", "is", "are", "you", "what", "when", "where", "why", "how", "can", "do", "and",
+    "please", "help", "question", "search", "about", "this", "that", "it"
+}
+
+SHORT_ENGLISH_ALLOWED = {
+    "hi", "hello", "hey", "thanks", "thank", "yes", "no", "ok", "okay", "help"
+}
+
+LEARNING_DOMAIN_KEYWORDS = {
+    "complex_math": ["math", "algebra", "calculus", "geometry", "equation", "proof", "statistics", "probability"],
+    "computer_coding": ["code", "coding", "python", "javascript", "java", "bug", "debug", "algorithm", "api", "database"],
+    "human_psychology": ["psychology", "behavior", "emotion", "mind", "cognitive", "trauma", "anxiety", "motivation"],
+    "pattern_recognition": ["pattern", "signal", "trend", "recognize", "classification", "anomaly", "cluster"],
+    "problem_solving": ["problem", "solve", "strategy", "optimize", "decision", "reasoning", "logic"],
+}
+
+CLARIFICATION_TEMPLATE = (
+    "I want to avoid giving you a wrong answer. "
+    "Can you clarify your goal and desired level of detail? "
+    "If you want live sources, say: 'search web: <topic>'."
+)
+
+_BACKGROUND_RESEARCH_QUEUE = queue_mod.Queue(maxsize=BACKGROUND_RESEARCH_MAX_QUEUE)
+_BACKGROUND_RESEARCH_PENDING = set()
+_BACKGROUND_RESEARCH_LOCK = threading.Lock()
+_BACKGROUND_RESEARCH_STARTED = False
 
 
 def _initialize_language_model() -> NeuralLanguageModel:
@@ -140,6 +237,179 @@ def _source_reliability_weight(source: str) -> float:
         "url": 0.70,            # Direct URL fetch
     }
     return source_weights.get(source, 0.6)
+
+
+def _normalize_user_text(text: str) -> str:
+    cleaned = text.strip().lower()
+    cleaned = re.sub(r"[^a-z0-9\s\?\!\.]", " ", cleaned)
+    tokens = cleaned.split()
+    normalized_tokens = [COMMON_TEXT_NORMALIZATIONS.get(tok, tok) for tok in tokens]
+    normalized = " ".join(normalized_tokens)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _is_probably_english(text: str) -> bool:
+    tokens = re.findall(r"[a-zA-Z]+", text.lower())
+    if not tokens:
+        return False
+    ascii_ratio = sum(1 for ch in text if ord(ch) < 128) / max(1, len(text))
+    hint_hits = sum(1 for t in tokens if t in ENGLISH_HINT_WORDS)
+    if ascii_ratio < 0.85:
+        return False
+    if hint_hits >= 1:
+        return True
+    # Permit only short common-English chats when there are no hint-word matches.
+    if len(tokens) <= 3 and any(t in SHORT_ENGLISH_ALLOWED for t in tokens):
+        return True
+    return False
+
+
+def _is_explicit_search_request(original_text: str, normalized_text: str) -> bool:
+    if _extract_url_candidate(original_text):
+        return True
+    explicit_phrases = [
+        "search ", "search for", "look up", "find out", "google", "duckduckgo", "bing",
+        "web search", "search web", "search online", "find on web"
+    ]
+    return any(p in normalized_text for p in explicit_phrases)
+
+
+def _is_question(normalized_text: str, original_text: str) -> bool:
+    if original_text.strip().endswith("?"):
+        return True
+    starters = ("what", "when", "where", "why", "how", "who", "can", "do", "does", "is", "are", "should", "could", "would")
+    return normalized_text.startswith(starters)
+
+
+def _match_basic_interaction(normalized_text: str) -> str:
+    tokens = set(re.findall(r"[a-z0-9]+", normalized_text))
+
+    def pattern_matches(pattern: str) -> bool:
+        p = pattern.strip().lower()
+        if not p:
+            return False
+        # Multi-word patterns are matched as phrases; single words by token boundary.
+        if " " in p:
+            return p in normalized_text
+        return p in tokens
+
+    for interaction in BASIC_INTERACTIONS:
+        if any(pattern_matches(pattern) for pattern in interaction.get("patterns", [])):
+            responses = interaction.get("responses")
+            if responses:
+                return responses[hash(normalized_text) % len(responses)]
+            return interaction.get("response", "")
+    return ""
+
+
+def _extract_learning_domains(normalized_text: str) -> list:
+    domains = []
+    for domain, keywords in LEARNING_DOMAIN_KEYWORDS.items():
+        if any(k in normalized_text for k in keywords):
+            domains.append(domain)
+    return domains
+
+
+def _queue_domain_learning_topics(normalized_text: str):
+    domains = _extract_learning_domains(normalized_text)
+    for d in domains:
+        add_to_learning_queue(d)
+
+
+def _response_seems_low_confidence(response: str) -> bool:
+    text = (response or "").strip().lower()
+    if not text:
+        return True
+    if len(text.split()) < 4:
+        return True
+    uncertain_markers = [
+        "i'm still learning",
+        "i encountered an issue",
+        "i'm processing",
+        "am help am",
+        "can help am",
+    ]
+    if any(m in text for m in uncertain_markers):
+        return True
+    # Repetitive token pattern can indicate low-quality generation.
+    words = re.findall(r"[a-z]+", text)
+    if len(words) >= 6:
+        repeats = len(words) - len(set(words))
+        if repeats >= max(3, len(words) // 2):
+            return True
+    return False
+
+
+def _background_research_query(prompt: str) -> str:
+    text = _normalize_user_text(prompt)
+    # Remove explicit command words when forming autonomous research query.
+    text = re.sub(r"\b(search|look\s+up|find\s+out|search\s+web|search\s+online)\b", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or prompt.strip()
+
+
+def _start_background_research_worker():
+    global _BACKGROUND_RESEARCH_STARTED
+    if not BACKGROUND_RESEARCH_ENABLED:
+        return
+    with _BACKGROUND_RESEARCH_LOCK:
+        if _BACKGROUND_RESEARCH_STARTED:
+            return
+        worker = threading.Thread(target=_background_research_worker, name="peakebot-bg-research", daemon=True)
+        worker.start()
+        _BACKGROUND_RESEARCH_STARTED = True
+        print("🤖 Background research worker started")
+
+
+def _enqueue_background_research(prompt: str, reason: str = ""):
+    if not BACKGROUND_RESEARCH_ENABLED:
+        return
+    query = _background_research_query(prompt)
+    if len(query) < 4:
+        return
+    with _BACKGROUND_RESEARCH_LOCK:
+        if query in _BACKGROUND_RESEARCH_PENDING:
+            return
+        _BACKGROUND_RESEARCH_PENDING.add(query)
+    try:
+        _BACKGROUND_RESEARCH_QUEUE.put_nowait((query, reason))
+        _start_background_research_worker()
+    except Exception:
+        with _BACKGROUND_RESEARCH_LOCK:
+            _BACKGROUND_RESEARCH_PENDING.discard(query)
+        print("⚠️ Background research queue is full; skipping task")
+
+
+def _background_research_worker():
+    while True:
+        query, reason = _BACKGROUND_RESEARCH_QUEUE.get()
+        try:
+            _run_background_research(query, reason)
+        except Exception as e:
+            print(f"⚠️ Background research failed for '{query}': {str(e)}")
+        finally:
+            with _BACKGROUND_RESEARCH_LOCK:
+                _BACKGROUND_RESEARCH_PENDING.discard(query)
+            _BACKGROUND_RESEARCH_QUEUE.task_done()
+
+
+def _run_background_research(query: str, reason: str = ""):
+    verified = search_web_verified(query)
+    hits = verified.get("hits", [])
+    snippet_texts = [
+        h.get("snippet", "")
+        for h in hits
+        if h.get("verification_status") == "supported"
+        and h.get("confidence", 0) >= MIN_LEARNING_CONFIDENCE
+        and h.get("snippet")
+    ]
+    if snippet_texts:
+        try:
+            model.train_on_text(snippet_texts, epochs=1)
+            print(f"🤖 Background research learned {len(snippet_texts)} snippet(s) for '{query}' ({reason or 'auto'})")
+        except Exception as e:
+            print(f"⚠️ Background learning failed for '{query}': {str(e)}")
 
 
 def _fetchai_generate_response(prompt: str, memory_context: str = "", web_context: str = "") -> str:
@@ -948,43 +1218,39 @@ def remember(prompt, response):
     generate_webpage(memory[-50:])
 
 def generate_response(prompt):
-    """Generate response using direct Q&A, memory, and web search"""
-    pl = prompt.lower().strip()
-    
-    # DIRECT Q&A LAYER: Handle common questions directly instead of pattern matching
-    # This ensures responsive, contextual answers
-    affirmative_responses = [
-        "Yes, absolutely!",
-        "Of course!",
-        "Definitely!",
-        "You bet!",
-        "Totally!"
-    ]
-    
-    # Handle yes/no questions
-    if any(q in pl for q in ["can i ask", "can you help", "are you there", "are you working", "do you work"]):
-        return affirmative_responses[hash(prompt) % len(affirmative_responses)]
-    
-    if any(q in pl for q in ["do you understand", "do you get it", "are you listening", "hear me"]):
-        return "Yes, I understand you. Each conversation helps me learn better. Please continue!"
-    
-    if any(q in pl for q in ["why aren't you", "why don't you", "not answering", "not responding"]):
-        return "I apologize for any confusion. I'm here and ready to help. What would you like to know?"
-    
-    if any(q in pl for q in ["what are you", "who are you", "your name", "call you"]):
-        return "I'm PeakeBot, an AI assistant built on Hive. I search the web, learn from conversations, and help with questions about cryptocurrency, Hive, and many other topics."
-    
-    if any(q in pl for q in ["hello", "hi ", "hey "]):
-        return "Hello! Welcome to PeakeBot. How can I help you today?"
-    
-    if any(q in pl for q in ["thanks", "thank you", "appreciate"]):
-        return "You're welcome! Happy to help. Feel free to ask me anything else."
-    
-    if any(q in pl for q in ["how are you", "how do you feel", "you okay"]):
-        return "I'm doing well, thank you for asking! I'm ready to assist and learn from you."
-    
-    # Check if user is asking for web search or included a URL/domain
-    web_trigger = any(phrase in pl for phrase in ["search", "look up", "find out", "what is", "who is", "when did", "how do", "tell me about", "explain"]) or bool(_extract_url_candidate(pl))
+    """Generate response using basic intent handling, memory, and explicit web search."""
+    raw_prompt = prompt.strip()
+    pl = _normalize_user_text(raw_prompt)
+
+    if not raw_prompt:
+        return "Please type a message, and I will help."
+
+    if not _is_probably_english(pl):
+        return "I work best in English right now. Please rephrase your message in English, even if grammar is imperfect."
+
+    # Basic interaction layer (greetings, awareness, thanks, etc.).
+    basic_reply = _match_basic_interaction(pl)
+    if basic_reply:
+        return basic_reply
+
+    # Proactively queue learning for strategic domains.
+    detected_domains = _extract_learning_domains(pl)
+    _queue_domain_learning_topics(pl)
+
+    # Web search must be explicitly requested by the user.
+    web_trigger = _is_explicit_search_request(raw_prompt, pl)
+
+    # For key learning domains, prefer clarification over uncertain local generation.
+    if detected_domains and not web_trigger:
+        domain_label = ", ".join(detected_domains)
+        clarification = (
+            f"I detected this is about {domain_label.replace('_', ' ')}. "
+            "To avoid giving a wrong answer, can you clarify your exact goal, current level, and desired output format? "
+            "If you want live references, say: 'search web: <topic>'."
+        )
+        _enqueue_background_research(raw_prompt, reason="domain_clarification")
+        remember(prompt, clarification)
+        return clarification
     
     # Build context from memory
     memory_snippets = fetch_all_ftp_memory()
@@ -992,7 +1258,7 @@ def generate_response(prompt):
     # PRIORITY 1: Check for exact/similar past responses (trained knowledge retention)
     exact_match = None
     for m in reversed(memory_snippets):
-        if m["prompt"].lower().strip() == pl:
+        if _normalize_user_text(m["prompt"]) == pl:
             exact_match = m["response"]
             break
     
@@ -1004,12 +1270,19 @@ def generate_response(prompt):
     # PRIORITY 2: Find similar prompts for context
     relevant = [m for m in memory_snippets if any(w in prompt.lower() for w in m["prompt"].lower().split() if len(w) > 3)]
     memory_context = "\n".join([f"- {m['prompt']} → {m['response']}" for m in relevant[-5:]])
+
+    # If intent is a question and not explicit search, ask for clarification before searching.
+    if _is_question(pl, raw_prompt) and not web_trigger:
+        clarification = CLARIFICATION_TEMPLATE
+        _enqueue_background_research(raw_prompt, reason="question_clarification")
+        remember(prompt, clarification)
+        return clarification
     
     # PRIORITY 3: Multi-source search if triggered
     web_info = ""
     web_context = ""
     if web_trigger:
-        verified = search_web_verified(prompt)
+        verified = search_web_verified(raw_prompt)
         web_info = verified.get("text")
         if web_info:
             print(f"🌐 Gathered and verified external sources...")
@@ -1034,14 +1307,6 @@ def generate_response(prompt):
                 remember(prompt, web_context)
                 return web_context
     
-    # Build rich context for the model
-    full_context = "SYSTEM: You are PeakeBot, a helpful and friendly AI assistant. You are knowledgeable about Hive, cryptocurrency, and many topics. Be conversational, warm, and remember what you've learned. Keep responses concise but informative.\n\n"
-    
-    if memory_context:
-        full_context += "📚 PAST INTERACTIONS:\n" + memory_context + "\n\n"
-    
-    full_context += f"USER: {prompt}\nPeakeBot:"
-
     # PRIORITY 4: Optional Fetch.ai provider (if configured)
     fetchai_reply = _fetchai_generate_response(prompt, memory_context=memory_context, web_context=web_context)
     if fetchai_reply:
@@ -1050,7 +1315,8 @@ def generate_response(prompt):
     
     # Generate a conversational response using the language model
     try:
-        response = model.generate_response(full_context, max_length=200)
+        # Pass direct user input to avoid false intent triggers from injected context text.
+        response = model.generate_response(prompt, max_length=200)
         if not response or response.strip() == "" or response == "PeakeBot:":
             # Fallback for open-ended questions
             response = f"That's an interesting question about '{prompt}'. I'm learning more about that topic. Feel free to tell me more or ask something else!"
@@ -1058,9 +1324,13 @@ def generate_response(prompt):
             keywords = re.findall(r"\b[a-z]{4,}\b", prompt.lower())
             if keywords:
                 add_to_learning_queue(keywords[0])
+        elif _response_seems_low_confidence(response):
+            _enqueue_background_research(raw_prompt, reason="low_confidence_response")
+            response = CLARIFICATION_TEMPLATE
     except Exception as e:
         print(f"⚠️ Model error: {str(e)}")
-        response = "I encountered an issue generating a response, but I'm learning! Can you rephrase that?"
+        _enqueue_background_research(raw_prompt, reason="model_exception")
+        response = CLARIFICATION_TEMPLATE
     
     # Clean up response if it contains system artifacts
     response = response.replace("PeakeBot:", "").replace("SYSTEM:", "").strip()

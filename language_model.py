@@ -375,20 +375,28 @@ class NeuralLanguageModel:
         """Generate a response to input text with grammar rules"""
         tokens = self.tokenize(input_text)
         input_lower = input_text.lower()
+        token_set = set(tokens)
+
+        def has_any_word(words):
+            return any(w in token_set for w in words)
+
+        def has_any_phrase(phrases):
+            return any(p in input_lower for p in phrases)
+
         context_indices = [self.vocab.get(w, 1) for w in tokens[-10:]]  # Last 10 words as context
         
         # Pattern matching for common queries
-        if any(word in input_lower for word in ["hello", "hi", "hey", "greetings"]):
+        if has_any_word(["hello", "hi", "hey", "greetings"]):
             return np.random.choice(self.sentence_patterns['greetings'])
         
-        if any(phrase in input_lower for phrase in ["who are you", "what are you", "your name"]):
+        if has_any_phrase(["who are you", "what are you", "your name"]):
             return "I am Genesis, an autonomous AI created to learn and help. I'm continuously learning from our conversations and improving my understanding."
         
-        if any(word in input_lower for word in ["thanks", "thank you", "appreciate"]):
+        if has_any_word(["thanks", "appreciate"]) or has_any_phrase(["thank you"]):
             return "You're welcome! I'm happy to help and learn with you."
         
         # Check for dictionary lookups
-        if any(word in input_lower for word in ["what", "define", "meaning", "mean"]):
+        if has_any_word(["what", "define", "meaning", "mean"]):
             for potential_word in tokens:
                 if potential_word not in ["what", "is", "the", "define", "meaning", "of", "mean", "does", "a"]:
                     definition = self.get_word_meaning(potential_word)
