@@ -1,0 +1,44 @@
+# Keep repository focused on PeakeBot top-level files only.
+# Ignore everything by default.
+/*
+
+# Keep this file tracked.
+!.gitignore
+
+# Allow only top-level PeakeBot files (no directories).
+!autonomous_ai.py
+!base_knowledge_overrides.json
+!DEPLOYMENT_COMPLETE.md
+!DEPLOY_ADMIN_PANEL.md
+!genesis_knowledge.json
+!genesis_memory.json
+!growth_profile.json
+!language_model.pkl
+!language_model.py
+!learned_topics.json
+!learning_queue.json
+!MULTI_ENGINE_SEARCH.md
+!online_learning_buffer.json
+!peakebot.py
+!peakebot_memory.json
+!README_GENESIS.md
+!README_RENDER.md
+!render.yaml
+!RENDER_ENV_FIX.md
+!RENDER_SETUP_INSTRUCTIONS.sh
+!requirements.txt
+!set_render_env.sh
+!validate_admin_setup.py
+!web_app.py
+
+# Never include directories from this workspace.
+*/
+
+# Runtime/cache artifacts
+*.pyc
+__pycache__/
+*.db
+*.sqlite3
+node_modules/
+.env
+*.env
