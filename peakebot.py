@@ -585,7 +585,51 @@ def get_ftp_status() -> dict:
         "ftp_configured": bool(FTP_HOST and FTP_USER and FTP_PASS),
         "will_auto_flush_at": f"{max(1, FTP_UPLOAD_BATCH_SIZE)} entries",
         "status": "ready" if FTP_HOST and FTP_USER and FTP_PASS else "not configured",
+        "host": FTP_HOST,
+        "user": FTP_USER,
+        "base_dir": FTP_BASE_DIR,
+        "has_password": bool(FTP_PASS),
     }
+
+
+def set_ftp_config(host=None, user=None, password=None, base_dir=None, batch_size=None) -> dict:
+    """Update FTP configuration at runtime from admin panel inputs."""
+    global FTP_HOST, FTP_USER, FTP_PASS, FTP_BASE_DIR, FTP_UPLOAD_BATCH_SIZE
+
+    if host is not None:
+        value = str(host).strip()
+        if not value:
+            raise ValueError("FTP host cannot be empty")
+        FTP_HOST = value
+
+    if user is not None:
+        value = str(user).strip()
+        if not value:
+            raise ValueError("FTP user cannot be empty")
+        FTP_USER = value
+
+    if password is not None:
+        value = str(password).strip()
+        if not value:
+            raise ValueError("FTP password cannot be empty")
+        FTP_PASS = value
+
+    if base_dir is not None:
+        value = str(base_dir).strip()
+        if not value:
+            raise ValueError("FTP base dir cannot be empty")
+        FTP_BASE_DIR = value
+
+    if batch_size is not None:
+        try:
+            value = int(batch_size)
+        except Exception:
+            raise ValueError("FTP batch size must be an integer")
+        if value < 1 or value > 1000:
+            raise ValueError("FTP batch size must be between 1 and 1000")
+        FTP_UPLOAD_BATCH_SIZE = value
+
+    return get_ftp_status()
 
 
 def flush_sync_tasks():

@@ -12,6 +12,7 @@ from peakebot import (
   queue_learning_topic,
   get_growth_snapshot,
   get_ftp_status,
+  set_ftp_config,
   flush_sync_tasks,
 )
 
@@ -361,6 +362,32 @@ def admin_index() -> Response:
       </div>
 
       <div class=\"card\">
+        <h3>FTP Settings</h3>
+        <div class=\"row\">
+          <label>FTP Host</label>
+          <input id=\"ftpHost\" placeholder=\"ftp.example.com\" />
+        </div>
+        <div class=\"row\">
+          <label>FTP User</label>
+          <input id=\"ftpUser\" placeholder=\"username\" />
+        </div>
+        <div class=\"row\">
+          <label>FTP Password</label>
+          <input id=\"ftpPass\" type=\"password\" placeholder=\"Leave blank to keep current\" />
+        </div>
+        <div class=\"row\">
+          <label>FTP Base Dir</label>
+          <input id=\"ftpBaseDir\" placeholder=\"/\" />
+        </div>
+        <div class=\"row\">
+          <label>FTP Batch Size</label>
+          <input id=\"ftpBatchSize\" type=\"number\" min=\"1\" max=\"1000\" placeholder=\"3\" />
+        </div>
+        <button id=\"loadFtpConfig\">Load FTP Config</button>
+        <button id=\"saveFtpConfig\">Save FTP Config</button>
+      </div>
+
+      <div class=\"card\">
         <h3>Status</h3>
         <button id=\"refreshStatus\">Refresh Status</button>
         <button id=\"ftpStatus\">FTP Status</button>
@@ -464,6 +491,37 @@ def admin_index() -> Response:
       }
     };
 
+    document.getElementById('loadFtpConfig').onclick = async () => {
+      try {
+        const data = await api('/api/admin/ftp-config');
+        document.getElementById('ftpHost').value = data.host || '';
+        document.getElementById('ftpUser').value = data.user || '';
+        document.getElementById('ftpBaseDir').value = data.base_dir || '';
+        document.getElementById('ftpBatchSize').value = data.batch_size || '';
+        show(data);
+      } catch (e) {
+        show('Error: ' + e.message);
+      }
+    };
+
+    document.getElementById('saveFtpConfig').onclick = async () => {
+      try {
+        const payload = {
+          host: document.getElementById('ftpHost').value.trim() || null,
+          user: document.getElementById('ftpUser').value.trim() || null,
+          base_dir: document.getElementById('ftpBaseDir').value.trim() || null,
+          batch_size: document.getElementById('ftpBatchSize').value.trim() || null,
+        };
+        const password = document.getElementById('ftpPass').value.trim();
+        if (password) payload.password = password;
+
+        const data = await api('/api/admin/ftp-config', 'POST', payload);
+        show(data);
+      } catch (e) {
+        show('Error: ' + e.message);
+      }
+    };
+
       document.getElementById('ftpStatus').onclick = async () => {
         try {
           const data = await api('/api/admin/ftp-status');
@@ -559,6 +617,45 @@ def admin_flush_sync() -> Response:
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
     return jsonify({"ok": True, "message": "sync tasks flushed"})
+
+
+@app.get("/api/admin/ftp-config")
+def admin_get_ftp_config() -> Response:
+    ok, error = _admin_enabled_and_configured()
+    if not ok:
+        return error, 503
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_admin_rate_limit(client_ip):
+        return jsonify({"error": "admin rate limit exceeded"}), 429
+    if not _is_admin_authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    return jsonify(get_ftp_status())
+
+
+@app.post("/api/admin/ftp-config")
+def admin_set_ftp_config() -> Response:
+    ok, error = _admin_enabled_and_configured()
+    if not ok:
+        return error, 503
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_admin_rate_limit(client_ip):
+        return jsonify({"error": "admin rate limit exceeded"}), 429
+    if not _is_admin_authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        status = set_ftp_config(
+            host=payload.get("host"),
+            user=payload.get("user"),
+            password=payload.get("password"),
+            base_dir=payload.get("base_dir"),
+            batch_size=payload.get("batch_size"),
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    return jsonify({"ok": True, "ftp": status})
 
 
 @app.get("/api/admin/ftp-status")
