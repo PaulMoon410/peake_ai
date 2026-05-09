@@ -4,6 +4,7 @@ import time
 import threading
 import queue as queue_mod
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from ftplib import FTP
 import re
 import requests
@@ -28,12 +29,14 @@ except Exception:
 
 HISTORY_FILE = "peakebot_memory.json"
 KEY_FILE = "hive_keys.json"
-FTP_HOST = "<REDACTED_FTP_HOST>"
-FTP_USER = "<REDACTED_FTP_USER>"
-FTP_PASS = "<REDACTED_FTP_PASS>"
-FTP_BASE_DIR = "<REDACTED_FTP_BASE_DIR>"
+FTP_HOST = os.getenv("FTP_HOST", "<REDACTED_FTP_HOST>").strip()
+FTP_USER = os.getenv("FTP_USER", "<REDACTED_FTP_USER>").strip()
+FTP_PASS = os.getenv("FTP_PASS", "<REDACTED_FTP_PASS>").strip()
+FTP_BASE_DIR = os.getenv("FTP_BASE_DIR", "<REDACTED_FTP_BASE_DIR>").strip()
+FTP_UPLOAD_BATCH_SIZE = int(os.getenv("FTP_UPLOAD_BATCH_SIZE", "3"))
 LEARNING_QUEUE_FILE = "learning_queue.json"
 LEARNED_TOPICS_FILE = "learned_topics.json"
+KNOWLEDGE_OVERRIDES_FILE = "base_knowledge_overrides.json"
 KNOWLEDGE_GROUP_PREFIX = "knowledge"
 KNOWLEDGE_GROUP_MAX_BYTES = 100 * 1024 * 1024  # 100MB
 WORKING_MEMORY_MAX_ENTRIES = 500
@@ -48,6 +51,12 @@ FETCHAI_TIMEOUT_SECONDS = int(os.getenv("FETCHAI_TIMEOUT_SECONDS", "20"))
 FETCHAI_SELF_IMPROVE_TOPICS = int(os.getenv("FETCHAI_SELF_IMPROVE_TOPICS", "5"))
 BACKGROUND_RESEARCH_ENABLED = os.getenv("BACKGROUND_RESEARCH_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 BACKGROUND_RESEARCH_MAX_QUEUE = int(os.getenv("BACKGROUND_RESEARCH_MAX_QUEUE", "100"))
+ONLINE_LEARNING_ENABLED = os.getenv("ONLINE_LEARNING_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+ONLINE_LEARNING_BATCH_SIZE = int(os.getenv("ONLINE_LEARNING_BATCH_SIZE", "8"))
+ONLINE_LEARNING_MIN_INTERVAL_SECONDS = int(os.getenv("ONLINE_LEARNING_MIN_INTERVAL_SECONDS", "180"))
+ONLINE_LEARNING_BUFFER_FILE = "online_learning_buffer.json"
+GROWTH_PROFILE_FILE = "growth_profile.json"
+MODEL_SAVE_INTERVAL_INTERACTIONS = int(os.getenv("MODEL_SAVE_INTERVAL_INTERACTIONS", "20"))
 VERIFICATION_STOPWORDS = {
     "about", "after", "again", "also", "and", "been", "being", "from", "have",
     "into", "more", "most", "only", "that", "their", "there", "these", "they",
@@ -88,6 +97,16 @@ BASIC_INTERACTIONS = [
         "response": "I am PeakeBot, an AI assistant. I can chat, learn from interactions, and search when you explicitly ask.",
     },
     {
+        "name": "creator",
+        "patterns": ["who made you", "who built you", "who created you", "your creator", "made you"],
+        "response": "I was built by the PeakeBot developer team for the PeakeCoin project.",
+    },
+    {
+        "name": "location",
+        "patterns": ["where are you", "where do you live", "where are you located", "your location"],
+        "response": "I run as software on a server environment and chat with you online.",
+    },
+    {
         "name": "greeting",
         "patterns": ["hello", "hi", "hey", "greetings"],
         "response": "Hello! Welcome to PeakeBot. How can I help you today?",
@@ -104,8 +123,13 @@ BASIC_INTERACTIONS = [
     },
     {
         "name": "time",
-        "patterns": ["what time", "what is the time", "time", "current time", "whats the time"],
+        "patterns": ["what time", "what is the time", "time", "current time", "whats the time", "standard time", "est", "eastern time", "eastern standard time"],
         "response": None,  # Special handler will compute the time
+    },
+    {
+        "name": "date_info",
+        "patterns": ["what day", "what day is it", "day", "date", "month", "today", "current date"],
+        "response": None,  # Special handler computes day/date/month
     },
     {
         "name": "learning_capability",
@@ -116,6 +140,11 @@ BASIC_INTERACTIONS = [
         "name": "casual_acknowledgment",
         "patterns": ["weird", "cool", "interesting", "okay", "ok", "i see", "right", "sure", "got it", "makes sense"],
         "responses": ["I understand.", "Got it.", "Interesting observation.", "Thanks for the feedback.", "I agree."],
+    },
+    {
+        "name": "english_feedback",
+        "patterns": ["that is english", "this is english", "it is english"],
+        "response": "You are right. Thanks for the correction. I understood your message.",
     },
 ]
 
@@ -148,12 +177,12 @@ COMMON_TEXT_NORMALIZATIONS = {
 
 ENGLISH_HINT_WORDS = {
     "the", "is", "are", "you", "what", "when", "where", "why", "how", "can", "do", "and",
-    "please", "help", "question", "search", "about", "this", "that", "it"
+    "please", "help", "question", "search", "about", "this", "that", "it", "day", "month", "time", "name", "english"
 }
 
 SHORT_ENGLISH_ALLOWED = {
     "hi", "hello", "hey", "thanks", "thank", "yes", "no", "ok", "okay", "help",
-    "time", "date", "now", "when", "what", "who", "where", "why", "how"
+    "time", "date", "now", "when", "what", "who", "where", "why", "how", "month", "day", "today"
 }
 
 LEARNING_DOMAIN_KEYWORDS = {
@@ -170,10 +199,23 @@ CLARIFICATION_TEMPLATE = (
     "If you want live sources, say: 'search web: <topic>'."
 )
 
+BASE_KNOWLEDGE = {
+    "reinforcement learning": "Reinforcement learning is a method where an agent learns by trial and error, receiving rewards for better actions over time.",
+    "machine learning": "Machine learning is a field of AI where systems learn patterns from data to make predictions or decisions.",
+    "neural network": "A neural network is a layered mathematical model that learns relationships in data by adjusting weighted connections.",
+    "python": "Python is a high-level programming language known for readability, fast development, and a large ecosystem.",
+    "problem solving": "Effective problem solving usually means defining the goal, breaking the problem into parts, testing options, and iterating.",
+    "pattern recognition": "Pattern recognition is identifying regularities or structures in data so a system can classify or predict outcomes.",
+}
+
+_BASE_KNOWLEDGE_OVERRIDES = {}
+
 _BACKGROUND_RESEARCH_QUEUE = queue_mod.Queue(maxsize=BACKGROUND_RESEARCH_MAX_QUEUE)
 _BACKGROUND_RESEARCH_PENDING = set()
 _BACKGROUND_RESEARCH_LOCK = threading.Lock()
 _BACKGROUND_RESEARCH_STARTED = False
+_MODEL_TRAIN_LOCK = threading.Lock()
+_FTP_PENDING_ENTRIES = []
 
 
 def _initialize_language_model() -> NeuralLanguageModel:
@@ -224,6 +266,154 @@ def _dedupe_entries(entries: list) -> list:
         seen.add(key)
         unique.append(entry)
     return unique
+
+
+def _load_json_file(path: str, default_value):
+    try:
+        if not os.path.exists(path):
+            return default_value
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default_value
+
+
+def _save_json_file(path: str, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def _default_growth_profile() -> dict:
+    return {
+        "created_at": datetime.now().isoformat(),
+        "last_update": None,
+        "last_online_learning": None,
+        "total_interactions": 0,
+        "high_quality_interactions": 0,
+        "online_learning_runs": 0,
+        "total_learned_pairs": 0,
+        "model_checkpoints": 0,
+    }
+
+
+def _load_base_knowledge_overrides() -> dict:
+    data = _load_json_file(KNOWLEDGE_OVERRIDES_FILE, {})
+    if not isinstance(data, dict):
+        return {}
+    clean = {}
+    for k, v in data.items():
+        key = str(k).strip().lower()
+        val = str(v).strip()
+        if key and val:
+            clean[key] = val
+    return clean
+
+
+def _save_base_knowledge_overrides(overrides: dict):
+    _save_json_file(KNOWLEDGE_OVERRIDES_FILE, overrides)
+
+
+def _score_interaction_quality(prompt: str, response: str) -> float:
+    p = (prompt or "").strip()
+    r = (response or "").strip().lower()
+    if len(p) < 2 or len(r) < 4:
+        return 0.0
+    bad_markers = [
+        "i want to avoid giving you a wrong answer",
+        "i work best in english right now",
+        "please type a message",
+    ]
+    if any(m in r for m in bad_markers):
+        return 0.15
+    if len(r.split()) >= 8:
+        return 0.9
+    if len(r.split()) >= 4:
+        return 0.7
+    return 0.4
+
+
+def _queue_online_learning(prompt: str, response: str, source: str = "chat"):
+    if not ONLINE_LEARNING_ENABLED:
+        return
+    quality = _score_interaction_quality(prompt, response)
+    profile = _load_json_file(GROWTH_PROFILE_FILE, _default_growth_profile())
+    profile["total_interactions"] = int(profile.get("total_interactions", 0)) + 1
+    if quality >= 0.7:
+        profile["high_quality_interactions"] = int(profile.get("high_quality_interactions", 0)) + 1
+    profile["last_update"] = datetime.now().isoformat()
+    _save_json_file(GROWTH_PROFILE_FILE, profile)
+
+    if quality < 0.7:
+        # Track interaction stats, but only learn from stronger samples.
+        return
+
+    buffer_data = _load_json_file(ONLINE_LEARNING_BUFFER_FILE, {"items": []})
+    items = buffer_data.get("items", [])
+    items.append({
+        "prompt": prompt,
+        "response": response,
+        "source": source,
+        "quality": quality,
+        "timestamp": datetime.now().isoformat(),
+    })
+    buffer_data["items"] = items[-200:]
+    _save_json_file(ONLINE_LEARNING_BUFFER_FILE, buffer_data)
+    _flush_online_learning()
+
+
+def _flush_online_learning(force: bool = False):
+    if not ONLINE_LEARNING_ENABLED:
+        return
+
+    buffer_data = _load_json_file(ONLINE_LEARNING_BUFFER_FILE, {"items": []})
+    items = buffer_data.get("items", [])
+    if not items:
+        return
+
+    profile = _load_json_file(GROWTH_PROFILE_FILE, _default_growth_profile())
+    last_run_raw = profile.get("last_online_learning")
+    last_run = None
+    if last_run_raw:
+        try:
+            last_run = datetime.fromisoformat(last_run_raw)
+        except Exception:
+            last_run = None
+
+    if not force and len(items) < ONLINE_LEARNING_BATCH_SIZE:
+        return
+    if not force and last_run is not None:
+        elapsed = (datetime.now() - last_run).total_seconds()
+        if elapsed < ONLINE_LEARNING_MIN_INTERVAL_SECONDS:
+            return
+
+    batch = items[:ONLINE_LEARNING_BATCH_SIZE]
+    remaining = items[ONLINE_LEARNING_BATCH_SIZE:]
+    learned = 0
+
+    with _MODEL_TRAIN_LOCK:
+        for sample in batch:
+            try:
+                model.learn_from_conversation(sample.get("prompt", ""), sample.get("response", ""))
+                learned += 1
+            except Exception as e:
+                print(f"⚠️ Online learning sample skipped: {str(e)}")
+
+        if learned > 0:
+            try:
+                model.save_model("language_model.pkl")
+                profile["model_checkpoints"] = int(profile.get("model_checkpoints", 0)) + 1
+            except Exception as e:
+                print(f"⚠️ Model checkpoint save failed: {str(e)}")
+
+    buffer_data["items"] = remaining
+    _save_json_file(ONLINE_LEARNING_BUFFER_FILE, buffer_data)
+
+    if learned > 0:
+        profile["online_learning_runs"] = int(profile.get("online_learning_runs", 0)) + 1
+        profile["total_learned_pairs"] = int(profile.get("total_learned_pairs", 0)) + learned
+        profile["last_online_learning"] = datetime.now().isoformat()
+        _save_json_file(GROWTH_PROFILE_FILE, profile)
+        print(f"🧠 Online learning updated model with {learned} high-quality interaction(s)")
 
 
 def _knowledge_file_sort_key(filename: str):
@@ -300,11 +490,19 @@ def _is_probably_english(text: str) -> bool:
 def _is_explicit_search_request(original_text: str, normalized_text: str) -> bool:
     if _extract_url_candidate(original_text):
         return True
-    explicit_phrases = [
-        "search ", "search for", "look up", "find out", "google", "duckduckgo", "bing",
-        "web search", "search web", "search online", "find on web"
-    ]
-    return any(p in normalized_text for p in explicit_phrases)
+
+    text = normalized_text.strip()
+    # Require command-like search intent so descriptive mentions do not trigger web search.
+    if text.startswith((
+        "search ", "search:", "search web", "search online", "web search ",
+        "look up ", "find out ", "google ", "duckduckgo ", "bing "
+    )):
+        return True
+
+    # Also allow direct request phrasing such as "can you search web for ...".
+    if re.search(r"\b(can|could|please)\s+you\s+(search|look\s+up|find\s+out)\b", text):
+        return True
+    return False
 
 
 def _is_question(normalized_text: str, original_text: str) -> bool:
@@ -312,6 +510,72 @@ def _is_question(normalized_text: str, original_text: str) -> bool:
         return True
     starters = ("what", "when", "where", "why", "how", "who", "can", "do", "does", "is", "are", "should", "could", "would")
     return normalized_text.startswith(starters)
+
+
+def _answer_from_base_knowledge(normalized_text: str) -> str:
+    for topic, answer in _BASE_KNOWLEDGE_OVERRIDES.items():
+        if topic in normalized_text:
+            return answer
+    for topic, answer in BASE_KNOWLEDGE.items():
+        if topic in normalized_text:
+            return answer
+    return ""
+
+
+def add_base_knowledge_entry(topic: str, answer: str) -> dict:
+    """Admin-safe knowledge insertion API with persistence."""
+    global _BASE_KNOWLEDGE_OVERRIDES
+    topic_key = (topic or "").strip().lower()
+    answer_text = (answer or "").strip()
+    if len(topic_key) < 2:
+        raise ValueError("topic must be at least 2 characters")
+    if len(answer_text) < 8:
+        raise ValueError("answer must be at least 8 characters")
+    if len(topic_key) > 120:
+        raise ValueError("topic must be at most 120 characters")
+    if len(answer_text) > 3000:
+        raise ValueError("answer must be at most 3000 characters")
+
+    _BASE_KNOWLEDGE_OVERRIDES[topic_key] = answer_text
+    _save_base_knowledge_overrides(_BASE_KNOWLEDGE_OVERRIDES)
+    return {
+        "topic": topic_key,
+        "answer": answer_text,
+        "source": "override",
+        "total_overrides": len(_BASE_KNOWLEDGE_OVERRIDES),
+    }
+
+
+def list_base_knowledge_entries(limit: int = 200) -> list:
+    """Return merged knowledge entries with overrides taking precedence."""
+    merged = dict(BASE_KNOWLEDGE)
+    merged.update(_BASE_KNOWLEDGE_OVERRIDES)
+    rows = [{"topic": k, "answer": v} for k, v in merged.items()]
+    rows.sort(key=lambda x: x["topic"])
+    return rows[:max(1, min(limit, 1000))]
+
+
+def queue_learning_topic(topic: str):
+    topic_text = (topic or "").strip()
+    if len(topic_text) < 2:
+        raise ValueError("topic must be at least 2 characters")
+    add_to_learning_queue(topic_text)
+
+
+def get_growth_snapshot() -> dict:
+    profile = _load_json_file(GROWTH_PROFILE_FILE, _default_growth_profile())
+    buffer_data = _load_json_file(ONLINE_LEARNING_BUFFER_FILE, {"items": []})
+    pending = len(buffer_data.get("items", [])) if isinstance(buffer_data, dict) else 0
+    return {
+        "growth_profile": profile,
+        "pending_online_learning_items": pending,
+        "knowledge_override_count": len(_BASE_KNOWLEDGE_OVERRIDES),
+    }
+
+
+def flush_sync_tasks():
+    _flush_pending_ftp_uploads(force=True)
+    _flush_online_learning(force=True)
 
 
 def _match_basic_interaction(normalized_text: str) -> str:
@@ -330,8 +594,22 @@ def _match_basic_interaction(normalized_text: str) -> str:
         if any(pattern_matches(pattern) for pattern in interaction.get("patterns", [])):
             # Special case: time handler computes current time
             if interaction.get("name") == "time":
+                if any(t in normalized_text for t in ["est", "eastern", "eastern standard time"]):
+                    est_now = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p")
+                    return f"The current Eastern Time is {est_now}."
                 current_time = datetime.now().strftime("%I:%M %p")
                 return f"The current time is {current_time}."
+
+            # Special case: date/day/month handler
+            if interaction.get("name") == "date_info":
+                now = datetime.now()
+                if "month" in normalized_text:
+                    return f"The current month is {now.strftime('%B')}."
+                if "day" in normalized_text:
+                    return f"Today is {now.strftime('%A')}."
+                if "date" in normalized_text or "today" in normalized_text:
+                    return f"Today's date is {now.strftime('%B %d, %Y')}."
+                return f"Today is {now.strftime('%A, %B %d, %Y')}."
             
             responses = interaction.get("responses")
             if responses:
@@ -443,7 +721,8 @@ def _run_background_research(query: str, reason: str = ""):
     ]
     if snippet_texts:
         try:
-            model.train_on_text(snippet_texts, epochs=1)
+            with _MODEL_TRAIN_LOCK:
+                model.train_on_text(snippet_texts, epochs=1)
             print(f"🤖 Background research learned {len(snippet_texts)} snippet(s) for '{query}' ({reason or 'auto'})")
         except Exception as e:
             print(f"⚠️ Background learning failed for '{query}': {str(e)}")
@@ -828,6 +1107,16 @@ if not os.path.exists(LEARNED_TOPICS_FILE):
     with open(LEARNED_TOPICS_FILE, "w") as f:
         json.dump({"topics": [], "last_learning_session": None}, f)
 
+if not os.path.exists(ONLINE_LEARNING_BUFFER_FILE):
+    with open(ONLINE_LEARNING_BUFFER_FILE, "w", encoding="utf-8") as f:
+        json.dump({"items": []}, f, indent=2)
+
+if not os.path.exists(GROWTH_PROFILE_FILE):
+    with open(GROWTH_PROFILE_FILE, "w", encoding="utf-8") as f:
+        json.dump(_default_growth_profile(), f, indent=2)
+
+    _BASE_KNOWLEDGE_OVERRIDES = _load_base_knowledge_overrides()
+
 def load_memory(n=5):
     ftp_memory = fetch_all_ftp_memory()
     return ftp_memory[-n:]
@@ -909,7 +1198,8 @@ def process_learning_queue(max_topics: int = 3):
                 
                 if snippet_texts:
                     try:
-                        model.train_on_text(snippet_texts, epochs=1)
+                        with _MODEL_TRAIN_LOCK:
+                            model.train_on_text(snippet_texts, epochs=1)
                         learned_data["topics"].append({
                             "topic": topic,
                             "timestamp": datetime.now().isoformat(),
@@ -1240,7 +1530,21 @@ def search_web(query):
     verified = search_web_verified(query)
     return verified.get("text")
 
+def _flush_pending_ftp_uploads(force: bool = False):
+    global _FTP_PENDING_ENTRIES
+    if not _FTP_PENDING_ENTRIES:
+        return
+    if not force and len(_FTP_PENDING_ENTRIES) < max(1, FTP_UPLOAD_BATCH_SIZE):
+        return
+
+    # Upload queued entries in one FTP session to reduce connection overhead.
+    queued = list(_FTP_PENDING_ENTRIES)
+    save_to_geocities(queued)
+    _FTP_PENDING_ENTRIES = []
+
+
 def remember(prompt, response):
+    global _FTP_PENDING_ENTRIES
     entry = {
         "timestamp": datetime.now().isoformat(),
         "prompt": prompt,
@@ -1251,8 +1555,12 @@ def remember(prompt, response):
     memory.append(entry)
     with open(HISTORY_FILE, "w") as f:
         json.dump(memory[-50:], f, indent=2)
-    save_to_geocities(entry)
-    generate_webpage(memory[-50:])
+
+    # Online growth loop: collect quality interactions and periodically retrain/checkpoint.
+    _queue_online_learning(prompt, response, source="conversation")
+
+    _FTP_PENDING_ENTRIES.append(entry)
+    _flush_pending_ftp_uploads(force=False)
 
 def generate_response(prompt):
     """Generate response using basic intent handling, memory, and explicit web search."""
@@ -1262,17 +1570,24 @@ def generate_response(prompt):
     if not raw_prompt:
         return "Please type a message, and I will help."
 
-    if not _is_probably_english(pl):
-        return "I work best in English right now. Please rephrase your message in English, even if grammar is imperfect."
-
-    # Basic interaction layer (greetings, awareness, thanks, etc.).
+    # Basic interaction layer first (greetings, identity, time/date, etc.).
     basic_reply = _match_basic_interaction(pl)
     if basic_reply:
+        remember(prompt, basic_reply)
         return basic_reply
+
+    if not _is_probably_english(pl):
+        return "I work best in English right now. Please rephrase your message in English, even if grammar is imperfect."
 
     # Proactively queue learning for strategic domains.
     detected_domains = _extract_learning_domains(pl)
     _queue_domain_learning_topics(pl)
+
+    # Fast factual base knowledge for core AI topics.
+    base_knowledge_reply = _answer_from_base_knowledge(pl)
+    if base_knowledge_reply:
+        remember(prompt, base_knowledge_reply)
+        return base_knowledge_reply
 
     # Web search must be explicitly requested by the user.
     web_trigger = _is_explicit_search_request(raw_prompt, pl)
@@ -1333,7 +1648,8 @@ def generate_response(prompt):
                     and h.get("snippet")
                 ]
                 if snippet_texts:
-                    model.train_on_text(snippet_texts, epochs=1)
+                    with _MODEL_TRAIN_LOCK:
+                        model.train_on_text(snippet_texts, epochs=1)
             except Exception as e:
                 print(f"⚠️ Learning from gathered sources failed: {str(e)}")
             
@@ -1394,9 +1710,15 @@ def post_to_hive(title, body):
     except Exception as e:
         print("❌ Failed to post to Hive:", str(e))
 
-def save_to_geocities(entry):
-    """Save entry to GeoCities as daily JSON groups with 100MB max-part rollover."""
+def save_to_geocities(entries):
+    """Save one or more entries to GeoCities as daily JSON groups with part rollover."""
     try:
+        if isinstance(entries, dict):
+            entries = [entries]
+        entries = [e for e in (entries or []) if isinstance(e, dict)]
+        if not entries:
+            return
+
         ftp = FTP(FTP_HOST)
         ftp.login(FTP_USER, FTP_PASS)
         ftp.set_pasv(True)
@@ -1429,15 +1751,15 @@ def save_to_geocities(entry):
             group_entries = []
 
         candidate_entries = list(group_entries)
-        candidate_entries.append(entry)
-        candidate_bytes = _serialize_json_bytes(candidate_entries)
+        candidate_entries.extend(entries)
+        candidate_bytes = _serialize_json_bytes(_dedupe_entries(candidate_entries))
 
         # Rollover to next part when current daily part exceeds max size.
         if len(candidate_bytes) > KNOWLEDGE_GROUP_MAX_BYTES and group_entries:
             current_part_num += 1
             current_filename = f"{KNOWLEDGE_GROUP_PREFIX}_{day_str}_part{current_part_num}.json"
             local_group_path = _tmp_path(current_filename)
-            group_entries = [entry]
+            group_entries = list(entries)
             candidate_bytes = _serialize_json_bytes(group_entries)
 
         with open(local_group_path, "wb") as f:
@@ -1459,7 +1781,7 @@ def save_to_geocities(entry):
         except:
             memory = []
         
-        memory.append(entry)
+        memory.extend(entries)
         memory = _dedupe_entries(memory)[-WORKING_MEMORY_MAX_ENTRIES:]
         
         local_path = _tmp_path("memory.json")
@@ -1468,13 +1790,39 @@ def save_to_geocities(entry):
         
         with open(local_path, "rb") as file:
             ftp.storbinary("STOR memory.json", file)
+
+        # Update HTML journal in same FTP session to avoid a second login per interaction.
+        _generate_webpage_via_ftp(memory[-50:], ftp)
         
         ftp.quit()
         print(f"📁 Memory saved to GeoCities (working memory: {len(memory)} entries)")
     except Exception as e:
         print("❌ FTP Upload failed:", str(e))
 
+
+def _generate_webpage_via_ftp(entries, ftp: FTP):
+    html_content = """
+    <html>
+    <head><title>PeakeBot Journal</title></head>
+    <body>
+    <h1>🧠 PeakeBot Public Journal</h1>
+    <p>AI entries generated by PeakeBot running on Raspberry Pi and published to GeoCities</p>
+    <hr>
+    """
+    for entry in reversed(entries):
+        html_content += f"<div><h3>{entry['timestamp']}</h3><p><b>You:</b> {entry['prompt']}<br><b>PeakeBot:</b> {entry['response']}</p><hr></div>"
+    html_content += "</body></html>"
+
+    local_path = _tmp_path("index.html")
+    with open(local_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    with open(local_path, "rb") as file:
+        ftp.storbinary("STOR index.html", file)
+    print("🌍 Updated PeakeBot journal webpage on GeoCities.")
+
 def generate_webpage(entries):
+    # Backward-compatible helper: one-off upload outside normal batched path.
     html_content = """
     <html>
     <head><title>PeakeBot Journal</title></head>
@@ -1566,6 +1914,9 @@ def interactive_loop():
         response = generate_response(prompt)
         print("PeakeBot:", response)
         print()
+
+        # Flush any buffered FTP entries before next prompt in interactive mode.
+        _flush_pending_ftp_uploads(force=True)
 
         if "post this" in prompt.lower():
             post_to_hive("🧠 PeakeBot Insight", response)
