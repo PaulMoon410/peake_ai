@@ -29,6 +29,7 @@ except Exception:
 
 HISTORY_FILE = "peakebot_memory.json"
 KEY_FILE = "hive_keys.json"
+FTP_RUNTIME_CONFIG_FILE = "ftp_runtime_config.json"
 FTP_HOST = os.getenv("FTP_HOST", "<REDACTED_FTP_HOST>").strip()
 FTP_USER = os.getenv("FTP_USER", "<REDACTED_FTP_USER>").strip()
 FTP_PASS = os.getenv("FTP_PASS", "<REDACTED_FTP_PASS>").strip()
@@ -283,6 +284,49 @@ def _save_json_file(path: str, data):
         json.dump(data, f, indent=2)
 
 
+def _normalize_ftp_base_dir(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return "/"
+    if "://" in text:
+        parsed = urlparse(text)
+        text = parsed.path or "/"
+    text = text.replace("\\", "/").strip()
+    if not text.startswith("/"):
+        text = "/" + text
+    text = re.sub(r"/{2,}", "/", text)
+    if len(text) > 1:
+        text = text.rstrip("/")
+    return text or "/"
+
+
+FTP_BASE_DIR = _normalize_ftp_base_dir(FTP_BASE_DIR)
+
+
+def _load_ftp_runtime_config() -> dict:
+    data = _load_json_file(FTP_RUNTIME_CONFIG_FILE, {})
+    if not isinstance(data, dict):
+        return {}
+    clean = {}
+    for key in ("host", "user", "password", "base_dir", "batch_size"):
+        if key in data and data[key] is not None:
+            clean[key] = data[key]
+    if "base_dir" in clean:
+        clean["base_dir"] = _normalize_ftp_base_dir(str(clean["base_dir"]))
+    return clean
+
+
+def _save_ftp_runtime_config(config: dict):
+    payload = {
+        "host": str(config.get("host", "")).strip(),
+        "user": str(config.get("user", "")).strip(),
+        "password": str(config.get("password", "")).strip(),
+        "base_dir": _normalize_ftp_base_dir(str(config.get("base_dir", ""))),
+        "batch_size": int(config.get("batch_size", FTP_UPLOAD_BATCH_SIZE)),
+    }
+    _save_json_file(FTP_RUNTIME_CONFIG_FILE, payload)
+
+
 def _default_growth_profile() -> dict:
     return {
         "created_at": datetime.now().isoformat(),
@@ -294,6 +338,28 @@ def _default_growth_profile() -> dict:
         "total_learned_pairs": 0,
         "model_checkpoints": 0,
     }
+
+
+def _apply_ftp_runtime_config():
+    global FTP_HOST, FTP_USER, FTP_PASS, FTP_BASE_DIR, FTP_UPLOAD_BATCH_SIZE
+    runtime_config = _load_ftp_runtime_config()
+    if not runtime_config:
+        return
+
+    FTP_HOST = str(runtime_config.get("host", FTP_HOST)).strip() or FTP_HOST
+    FTP_USER = str(runtime_config.get("user", FTP_USER)).strip() or FTP_USER
+    FTP_PASS = str(runtime_config.get("password", FTP_PASS)).strip() or FTP_PASS
+    FTP_BASE_DIR = _normalize_ftp_base_dir(runtime_config.get("base_dir", FTP_BASE_DIR)) or FTP_BASE_DIR
+
+    try:
+        batch_size = int(runtime_config.get("batch_size", FTP_UPLOAD_BATCH_SIZE))
+        if batch_size >= 1:
+            FTP_UPLOAD_BATCH_SIZE = batch_size
+    except Exception:
+        pass
+
+
+_apply_ftp_runtime_config()
 
 
 def _load_base_knowledge_overrides() -> dict:
@@ -615,7 +681,7 @@ def set_ftp_config(host=None, user=None, password=None, base_dir=None, batch_siz
         FTP_PASS = value
 
     if base_dir is not None:
-        value = str(base_dir).strip()
+        value = _normalize_ftp_base_dir(str(base_dir))
         if not value:
             raise ValueError("FTP base dir cannot be empty")
         FTP_BASE_DIR = value
@@ -628,6 +694,14 @@ def set_ftp_config(host=None, user=None, password=None, base_dir=None, batch_siz
         if value < 1 or value > 1000:
             raise ValueError("FTP batch size must be between 1 and 1000")
         FTP_UPLOAD_BATCH_SIZE = value
+
+    _save_ftp_runtime_config({
+        "host": FTP_HOST,
+        "user": FTP_USER,
+        "password": FTP_PASS,
+        "base_dir": FTP_BASE_DIR,
+        "batch_size": FTP_UPLOAD_BATCH_SIZE,
+    })
 
     return get_ftp_status()
 
@@ -1092,7 +1166,7 @@ def fetch_all_ftp_memory():
         ftp = FTP(FTP_HOST)
         ftp.login(FTP_USER, FTP_PASS)
         ftp.set_pasv(True)
-        ftp.cwd(FTP_BASE_DIR)
+        _ensure_ftp_directory(ftp, FTP_BASE_DIR)
         
         all_entries = []
         files = []
@@ -1781,7 +1855,7 @@ def save_to_geocities(entries):
         ftp = FTP(FTP_HOST)
         ftp.login(FTP_USER, FTP_PASS)
         ftp.set_pasv(True)
-        ftp.cwd(FTP_BASE_DIR)
+        _ensure_ftp_directory(ftp, FTP_BASE_DIR)
 
         files = []
         try:
@@ -1857,6 +1931,33 @@ def save_to_geocities(entries):
         print(f"📁 Memory saved to GeoCities (working memory: {len(memory)} entries)")
     except Exception as e:
         print("❌ FTP Upload failed:", str(e))
+
+
+def _ensure_ftp_directory(ftp: FTP, target_dir: str):
+    path = _normalize_ftp_base_dir(target_dir)
+    if path == "/":
+        try:
+            ftp.cwd("/")
+        except Exception:
+            pass
+        return
+
+    try:
+        ftp.cwd("/")
+    except Exception:
+        pass
+
+    for part in path.strip("/").split("/"):
+        if not part:
+            continue
+        try:
+            ftp.cwd(part)
+        except Exception:
+            try:
+                ftp.mkd(part)
+            except Exception:
+                pass
+            ftp.cwd(part)
 
 
 def _generate_webpage_via_ftp(entries, ftp: FTP):
