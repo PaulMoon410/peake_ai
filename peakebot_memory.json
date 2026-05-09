@@ -98,5 +98,70 @@
     "timestamp": "2026-05-08T20:30:43.621152",
     "prompt": "Thats weird",
     "response": "To , . i i information."
+  },
+  {
+    "timestamp": "2026-05-08T20:44:31.474318",
+    "prompt": "That is English",
+    "response": "I want to avoid giving you a wrong answer. Can you clarify your goal and desired level of detail? If you want live sources, say: 'search web: <topic>'."
+  },
+  {
+    "timestamp": "2026-05-08T20:44:31.575266",
+    "prompt": "I thought you searched the web or web search interface for information?",
+    "response": "I want to avoid giving you a wrong answer. Can you clarify your goal and desired level of detail? If you want live sources, say: 'search web: <topic>'."
+  },
+  {
+    "timestamp": "2026-05-08T20:46:25.078546",
+    "prompt": "What is reinforcement learning?",
+    "response": "Reinforcement learning is a method where an agent learns by trial and error, receiving rewards for better actions over time."
+  },
+  {
+    "timestamp": "2026-05-08T20:46:25.152512",
+    "prompt": "How does machine learning work?",
+    "response": "Machine learning is a field of AI where systems learn patterns from data to make predictions or decisions."
+  },
+  {
+    "timestamp": "2026-05-08T20:46:25.198536",
+    "prompt": "What is pattern recognition?",
+    "response": "Pattern recognition is identifying regularities or structures in data so a system can classify or predict outcomes."
+  },
+  {
+    "timestamp": "2026-05-08T20:46:35.740594",
+    "prompt": "What is neural network?",
+    "response": "A neural network is a layered mathematical model that learns relationships in data by adjusting weighted connections."
+  },
+  {
+    "timestamp": "2026-05-08T20:46:35.791653",
+    "prompt": "What is python?",
+    "response": "Python is a high-level programming language known for readability, fast development, and a large ecosystem."
+  },
+  {
+    "timestamp": "2026-05-08T20:46:35.855889",
+    "prompt": "What is problem solving?",
+    "response": "Effective problem solving usually means defining the goal, breaking the problem into parts, testing options, and iterating."
+  },
+  {
+    "timestamp": "2026-05-08T20:47:00.329780",
+    "prompt": "Who made you?",
+    "response": "I was built by the PeakeBot developer team for the PeakeCoin project."
+  },
+  {
+    "timestamp": "2026-05-08T20:47:00.383824",
+    "prompt": "Where are you?",
+    "response": "I run as software on a server environment and chat with you online."
+  },
+  {
+    "timestamp": "2026-05-08T20:49:04.908555",
+    "prompt": "batch-test-1",
+    "response": "ok one"
+  },
+  {
+    "timestamp": "2026-05-08T20:49:04.920821",
+    "prompt": "batch-test-2",
+    "response": "ok two"
+  },
+  {
+    "timestamp": "2026-05-08T20:49:04.951977",
+    "prompt": "batch-test-3",
+    "response": "ok three"
   }
 ]
