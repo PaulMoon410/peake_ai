@@ -102,6 +102,11 @@ BASIC_INTERACTIONS = [
         "patterns": ["how are you", "how do you feel", "you okay"],
         "response": "I am doing well and ready to assist.",
     },
+    {
+        "name": "time",
+        "patterns": ["what time", "what is the time", "time", "current time", "whats the time"],
+        "response": None,  # Special handler will compute the time
+    },
 ]
 
 COMMON_TEXT_NORMALIZATIONS = {
@@ -126,7 +131,8 @@ ENGLISH_HINT_WORDS = {
 }
 
 SHORT_ENGLISH_ALLOWED = {
-    "hi", "hello", "hey", "thanks", "thank", "yes", "no", "ok", "okay", "help"
+    "hi", "hello", "hey", "thanks", "thank", "yes", "no", "ok", "okay", "help",
+    "time", "date", "now", "when", "what", "who", "where", "why", "how"
 }
 
 LEARNING_DOMAIN_KEYWORDS = {
@@ -296,6 +302,11 @@ def _match_basic_interaction(normalized_text: str) -> str:
 
     for interaction in BASIC_INTERACTIONS:
         if any(pattern_matches(pattern) for pattern in interaction.get("patterns", [])):
+            # Special case: time handler computes current time
+            if interaction.get("name") == "time":
+                current_time = datetime.now().strftime("%I:%M %p")
+                return f"The current time is {current_time}."
+            
             responses = interaction.get("responses")
             if responses:
                 return responses[hash(normalized_text) % len(responses)]
