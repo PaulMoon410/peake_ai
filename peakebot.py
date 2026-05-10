@@ -4,11 +4,15 @@ import time
 import threading
 import queue as queue_mod
 from datetime import datetime
-from zoneinfo import ZoneInfo
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    from backports.zoneinfo import ZoneInfo
 from ftplib import FTP
 import re
 import requests
 from language_model import NeuralLanguageModel
+from local_llama import ask_local_llama
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus, urlparse
 import tempfile
@@ -1702,6 +1706,14 @@ def generate_response(prompt):
 
     if not raw_prompt:
         return "Please type a message, and I will help."
+
+    try:
+        local_llama_response = ask_local_llama(raw_prompt)
+        if local_llama_response:
+            remember(prompt, local_llama_response)
+            return local_llama_response
+    except Exception as e:
+        print(f"⚠️ Local llama unavailable, using fallback logic: {str(e)}")
 
     # Basic interaction layer first (greetings, identity, time/date, etc.).
     basic_reply = _match_basic_interaction(pl)
