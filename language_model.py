@@ -507,8 +507,12 @@ class NeuralLanguageModel:
     def load_model(self, filepath="language_model.pkl"):
         """Load model from disk"""
         if os.path.exists(filepath):
-            with open(filepath, 'rb') as f:
-                model_data = pickle.load(f)
+            try:
+                with open(filepath, 'rb') as f:
+                    model_data = pickle.load(f)
+            except Exception as e:
+                print("⚠️ Failed to load model from {}: {}".format(filepath, str(e)))
+                return False
             
             self.vocab = model_data['vocab']
             self.reverse_vocab = model_data['reverse_vocab']

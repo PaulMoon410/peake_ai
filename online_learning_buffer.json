@@ -1,3 +1,11 @@
 {
-  "items": []
+  "items": [
+    {
+      "prompt": "hello",
+      "response": "Hello! Welcome to PeakeBot. How can I help you today?",
+      "source": "conversation",
+      "quality": 0.9,
+      "timestamp": "2026-05-10T00:18:39.397579"
+    }
+  ]
 }

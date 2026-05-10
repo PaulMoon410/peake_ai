@@ -3,6 +3,7 @@ import threading
 import time
 import hmac
 from collections import defaultdict, deque
+from typing import Optional, Tuple
 from flask import Flask, jsonify, request, Response
 
 from peakebot import (
@@ -54,7 +55,7 @@ def _check_admin_rate_limit(client_ip: str) -> bool:
     return True
 
 
-def _admin_enabled_and_configured() -> tuple[bool, Response | None]:
+def _admin_enabled_and_configured() -> Tuple[bool, Optional[Response]]:
     if not ADMIN_PANEL_ENABLED:
         return False, jsonify({"error": "admin panel disabled"})
     if not ADMIN_API_KEY:
