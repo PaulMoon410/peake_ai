@@ -1,6 +1,6 @@
 import requests
 
-LOCAL_LLAMA_URL = "http://127.0.0.1:8080/v1/chat/completions"
+LOCAL_LLAMA_URL = "http://74.208.146.37:8080/v1/chat/completions"
 DEFAULT_SYSTEM_PROMPT = "You are PeakeBot, a helpful AI assistant for the PeakeCoin project."
 
 
