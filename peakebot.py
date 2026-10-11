@@ -779,6 +779,24 @@ def _response_seems_low_confidence(response: str) -> bool:
         "i'm still learning",
         "i encountered an issue",
         "i'm processing",
+        "i don't know",
+        "i do not know",
+        "i'm not sure",
+        "i am not sure",
+        "i can't verify",
+        "i cannot verify",
+        "i'm uncertain",
+        "i am uncertain",
+        "i don't have enough information",
+        "i do not have enough information",
+        "i may be wrong",
+        "i'm not well informed",
+        "i am not well informed",
+        "can you clarify",
+        "clarify your goal",
+        "desired level of detail",
+        "if you want live references",
+        "avoid giving you a wrong answer",
         "am help am",
         "can help am",
     ]
@@ -1700,143 +1718,108 @@ def remember(prompt, response):
     _flush_pending_ftp_uploads(force=False)
 
 def generate_response(prompt):
-    """Generate response using basic intent handling, memory, and explicit web search."""
-    raw_prompt = prompt.strip()
+    """Answer directly, and research when uncertain or explicitly asked."""
+    raw_prompt = (prompt or "").strip()
     pl = _normalize_user_text(raw_prompt)
-
     if not raw_prompt:
         return "Please type a message, and I will help."
 
-    try:
-        local_llama_response = ask_local_llama(raw_prompt)
-        if local_llama_response:
-            remember(prompt, local_llama_response)
-            return local_llama_response
-    except Exception as e:
-        print(f"⚠️ Local llama unavailable, using fallback logic: {str(e)}")
-
-    # Basic interaction layer first (greetings, identity, time/date, etc.).
+    # Handle simple identity/greeting requests without spending time on research.
     basic_reply = _match_basic_interaction(pl)
     if basic_reply:
-        remember(prompt, basic_reply)
+        remember(raw_prompt, basic_reply)
         return basic_reply
 
     if not _is_probably_english(pl):
-        return "I work best in English right now. Please rephrase your message in English, even if grammar is imperfect."
+        return "I work best in English right now. Please rephrase your message in English; grammar does not need to be perfect."
 
-    # Proactively queue learning for strategic domains.
     detected_domains = _extract_learning_domains(pl)
-    _queue_domain_learning_topics(pl)
+    if detected_domains:
+        _queue_domain_learning_topics(pl)
 
-    # Fast factual base knowledge for core AI topics.
-    base_knowledge_reply = _answer_from_base_knowledge(pl)
-    if base_knowledge_reply:
-        remember(prompt, base_knowledge_reply)
-        return base_knowledge_reply
-
-    # Web search must be explicitly requested by the user.
     web_trigger = _is_explicit_search_request(raw_prompt, pl)
-
-    # For key learning domains, prefer clarification over uncertain local generation.
-    if detected_domains and not web_trigger:
-        domain_label = ", ".join(detected_domains)
-        clarification = (
-            f"I detected this is about {domain_label.replace('_', ' ')}. "
-            "To avoid giving a wrong answer, can you clarify your exact goal, current level, and desired output format? "
-            "If you want live references, say: 'search web: <topic>'."
-        )
-        _enqueue_background_research(raw_prompt, reason="domain_clarification")
-        remember(prompt, clarification)
-        return clarification
-    
-    # Build context from memory
-    memory_snippets = fetch_all_ftp_memory()
-    
-    # PRIORITY 1: Check for exact/similar past responses (trained knowledge retention)
-    exact_match = None
-    for m in reversed(memory_snippets):
-        if _normalize_user_text(m["prompt"]) == pl:
-            exact_match = m["response"]
-            break
-    
-    if exact_match:
-        print(f"💾 Retrieved from memory: exact match found")
-        remember(prompt, exact_match)
-        return exact_match
-    
-    # PRIORITY 2: Find similar prompts for context
-    relevant = [m for m in memory_snippets if any(w in prompt.lower() for w in m["prompt"].lower().split() if len(w) > 3)]
-    memory_context = "\n".join([f"- {m['prompt']} → {m['response']}" for m in relevant[-5:]])
-
-    # If intent is a question and not explicit search, ask for clarification before searching.
-    if _is_question(pl, raw_prompt) and not web_trigger:
-        clarification = CLARIFICATION_TEMPLATE
-        _enqueue_background_research(raw_prompt, reason="question_clarification")
-        remember(prompt, clarification)
-        return clarification
-    
-    # PRIORITY 3: Multi-source search if triggered
-    web_info = ""
     web_context = ""
+    verified = {"hits": [], "text": None}
+
+    def research():
+        try:
+            result = search_web_verified(_background_research_query(raw_prompt))
+            if not isinstance(result, dict):
+                return {"hits": [], "text": None}
+            return result
+        except Exception as exc:
+            print(f"⚠️ Web research failed: {exc}")
+            return {"hits": [], "text": None}
+
+    # An explicit request to search takes priority. Uncertain answers also trigger
+    # synchronous research before Harold responds.
+    research_attempted = web_trigger
     if web_trigger:
-        verified = search_web_verified(raw_prompt)
-        web_info = verified.get("text")
-        if web_info:
-            print(f"🌐 Gathered and verified external sources...")
-            # Train only on cross-verified snippets.
-            try:
-                snippet_texts = [
-                    h.get("snippet", "")
-                    for h in verified.get("hits", [])
-                    if h.get("verification_status") == "supported"
-                    and h.get("confidence", 0) >= MIN_LEARNING_CONFIDENCE
-                    and h.get("snippet")
-                ]
-                if snippet_texts:
-                    with _MODEL_TRAIN_LOCK:
-                        model.train_on_text(snippet_texts, epochs=1)
-            except Exception as e:
-                print(f"⚠️ Learning from gathered sources failed: {str(e)}")
-            
-            # Use gathered info as context for conversation
-            web_context = web_info
-            # Return web results if available (they're already formatted with verification)
-            if web_context:
-                remember(prompt, web_context)
-                return web_context
-    
-    # PRIORITY 4: Optional Fetch.ai provider (if configured)
-    fetchai_reply = _fetchai_generate_response(prompt, memory_context=memory_context, web_context=web_context)
-    if fetchai_reply:
-        remember(prompt, fetchai_reply)
-        return fetchai_reply
-    
-    # Generate a conversational response using the language model
+        verified = research()
+        web_context = verified.get("text") or ""
+        if web_context:
+            response = (
+                "I searched the sources available to me. Here are the results, "
+                "with corroborated items marked as verified and other items labeled "
+                "unverified:\\n" + web_context
+            )
+            remember(raw_prompt, response)
+            return response
+        response = (
+            "I searched the sources available to me, but couldn’t find enough "
+            "reliable information to answer this confidently."
+        )
+        remember(raw_prompt, response)
+        return response
+
+    system_prompt = (
+        "You are Harold, a helpful assistant. Answer the user's actual question "
+        "directly and in plain language. Never claim to "
+        "have searched, verified, remembered, or performed an action unless the "
+        "provided context or tools show that you did. If the available information "
+        "does not support a reliable answer, say clearly that you are not sure. "
+        "For cybersecurity, help with learning and authorized defensive work; do "
+        "not provide guidance for unauthorized access, malware, credential theft, "
+        "or deploying code to systems without permission."
+    )
+
     try:
-        # Pass direct user input to avoid false intent triggers from injected context text.
-        response = model.generate_response(prompt, max_length=200)
-        if not response or response.strip() == "" or response in {"Harold:", "PeakeBot:"}:
-            # Fallback for open-ended questions
-            response = f"That's an interesting question about '{prompt}'. I'm learning more about that topic. Feel free to tell me more or ask something else!"
-            # Queue this topic for autonomous learning
-            keywords = re.findall(r"\b[a-z]{4,}\b", prompt.lower())
-            if keywords:
-                add_to_learning_queue(keywords[0])
-        elif _response_seems_low_confidence(response):
-            _enqueue_background_research(raw_prompt, reason="low_confidence_response")
-            response = CLARIFICATION_TEMPLATE
-    except Exception as e:
-        print(f"⚠️ Model error: {str(e)}")
-        _enqueue_background_research(raw_prompt, reason="model_exception")
-        response = CLARIFICATION_TEMPLATE
-    
-    # Clean up response if it contains system artifacts
+        response = ask_local_llama(
+            raw_prompt,
+            system_prompt=system_prompt,
+            max_tokens=450,
+        )
+    except Exception as exc:
+        print(f"⚠️ Local llama unavailable, using fallback logic: {exc}")
+        response = ""
+
+    # If Harold says he is unsure, research synchronously and return the best
+    # results found without sending stored memory or research data to the model API.
+    if not web_trigger and _response_seems_low_confidence(response):
+        research_attempted = True
+        verified = research()
+        web_context = verified.get("text") or ""
+        if web_context:
+            response = (
+                "I wasn’t sure, so I searched the sources available to me. Here are "
+                "the results I found; corroborated items are marked as verified:\\n"
+                + web_context
+            )
+
+    if not response or _response_seems_low_confidence(response):
+        if web_context:
+            response = (
+                "I’m not confident enough to summarize this reliably. I searched the "
+                "sources available to me; here are the results I found:\n" + web_context
+            )
+        else:
+            response = (
+                "I’m not well informed on this yet. I tried to research it, but "
+                "couldn’t find enough reliable information to give you a confident answer."
+            )
+
     response = response.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
-    if not response:
-        response = "I'm learning about that. Tell me more?"
-    
-    # Remember this interaction
-    remember(prompt, response)
+    remember(raw_prompt, response)
     return response
 
 def post_to_hive(title, body):
