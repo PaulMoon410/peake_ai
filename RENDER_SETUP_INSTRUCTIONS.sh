@@ -3,7 +3,7 @@
 # This script helps you configure the admin panel on your Render deployment
 
 echo "=========================================="
-echo "PeakeBot Admin Panel - Render Setup"
+echo "Harold Admin Panel - Render Setup"
 echo "=========================================="
 echo ""
 echo "Your service is live at:"

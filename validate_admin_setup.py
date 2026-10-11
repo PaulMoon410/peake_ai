@@ -37,7 +37,7 @@ response = test_client.get("/admin")
 
 if response.status_code == 200:
     print(f"   ✅ GET /admin returned 200")
-    if b"PeakeBot Admin Panel" in response.data:
+    if b"Harold Admin Panel" in response.data:
         print(f"   ✅ Admin panel HTML found")
     else:
         print(f"   ❌ Admin panel HTML not found")

@@ -1,4 +1,4 @@
-# ✅ PEAKEBOT DEPLOYMENT SUCCESSFUL
+# ✅ HAROLD DEPLOYMENT SUCCESSFUL
 
 ## Service Live ✅
 - **URL**: https://peake-ai.onrender.com
@@ -75,6 +75,6 @@ The deployment was verified working:
 - Service should show as "Live" with a green checkmark
 
 ## Summary
-✅ Your PeakeBot is live and running
+✅ Your Harold is live and running
 ✅ Admin panel is responsive and secure
 ⏳ You just need to set/verify your ADMIN_API_KEY on Render

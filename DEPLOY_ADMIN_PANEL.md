@@ -51,7 +51,7 @@ After ~3 minutes, visit:
 https://your-peakebot-url.onrender.com/admin
 ```
 
-You should see the PeakeBot Admin Panel login screen.
+You should see the Harold Admin Panel login screen.
 
 ## Using the Admin Panel
 1. Enter your `ADMIN_API_KEY` value (the secret key you set in Step 3)

@@ -2,7 +2,7 @@
 
 ## Overview
 
-PeakeBot now integrates **5 independent search engines + Hive + direct URLs** for powerful cross-verification of information. This makes the bot "smarter" by comparing data across diverse sources and assigning confidence scores based on how many sources corroborate each finding.
+Harold now integrates **5 independent search engines + Hive + direct URLs** for powerful cross-verification of information. This makes the bot "smarter" by comparing data across diverse sources and assigning confidence scores based on how many sources corroborate each finding.
 
 ## Search Engines Integrated
 
