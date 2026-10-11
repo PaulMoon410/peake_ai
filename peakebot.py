@@ -565,15 +565,15 @@ def _is_explicit_search_request(original_text: str, normalized_text: str) -> boo
     # Require command-like search intent so descriptive mentions do not trigger web search.
     if text.startswith((
         "search ", "search:", "search web", "search online", "web search ",
-        "look up ", "find out ", "google ", "duckduckgo ", "bing "
+        "look up ", "look into ", "find out ", "research ", "do research ",
+        "check sources ", "google ", "duckduckgo ", "bing "
     )):
         return True
 
-    # Also allow direct request phrasing such as "can you search web for ...".
-    if re.search(r"\b(can|could|please)\s+you\s+(search|look\s+up|find\s+out)\b", text):
+    # Also allow direct request phrasing such as "can you research this".
+    if re.search(r"\b(can|could|please)\s+you\s+(search|look\s+up|look\s+into|find\s+out|research)\b", text):
         return True
     return False
-
 
 def _is_question(normalized_text: str, original_text: str) -> bool:
     if original_text.strip().endswith("?"):
@@ -814,7 +814,7 @@ def _response_seems_low_confidence(response: str) -> bool:
 def _background_research_query(prompt: str) -> str:
     text = _normalize_user_text(prompt)
     # Remove explicit command words when forming autonomous research query.
-    text = re.sub(r"\b(search|look\s+up|find\s+out|search\s+web|search\s+online)\b", " ", text)
+    text = re.sub(r"\b(search|look\s+up|look\s+into|find\s+out|research|check\s+sources|search\s+web|search\s+online)\b", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text or prompt.strip()
 
@@ -1455,32 +1455,63 @@ def _search_news(query: str, max_items: int = 5) -> list:
         return []
 
 def _search_duckduckgo(query: str, max_items: int = 5) -> list:
-    """Search DuckDuckGo for results (privacy-focused alternative to Google)."""
+    """Search DuckDuckGo JSON first, then its HTML results page as a fallback."""
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; HaroldBot/1.0)"}
+    results = []
+
+    # Instant-answer JSON is fast, but often has no results for ordinary queries.
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        url = f"https://duckduckgo.com/?q={quote_plus(query)}&format=json"
+        url = f"https://api.duckduckgo.com/?q={quote_plus(query)}&format=json&no_redirect=1"
         res = requests.get(url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            for item in data.get("RelatedTopics", [])[:max_items]:
+                if "Result" in item:
+                    results.append({
+                        "title": _strip_html(item.get("Result", ""))[:200],
+                        "link": item.get("FirstURL", ""),
+                        "date": datetime.now().isoformat(),
+                        "snippet": item.get("Text", "")[:300],
+                    })
+            if results:
+                return results[:max_items]
+    except Exception as exc:
+        print(f"⚠️ DuckDuckGo instant-answer lookup failed: {exc}")
+
+    # Fall back to ordinary results for queries without an instant answer.
+    try:
+        from bs4 import BeautifulSoup
+
+        res = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            headers=headers,
+            timeout=10,
+        )
         if res.status_code != 200:
             return []
-        data = res.json()
-        results = []
-        
-        # Extract results from RelatedTopics
-        for item in data.get("RelatedTopics", [])[:max_items]:
-            if "Result" in item:
+        soup = BeautifulSoup(res.text, "html.parser")
+        for item in soup.select(".result"):
+            link_node = item.select_one(".result__a")
+            if not link_node:
+                continue
+            snippet_node = item.select_one(".result__snippet")
+            title = link_node.get_text(" ", strip=True)
+            link = link_node.get("href", "")
+            snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
+            if title and link:
                 results.append({
-                    "title": _strip_html(item.get("Result", ""))[:200],
-                    "link": item.get("FirstURL", ""),
-                    "date": datetime.now().isoformat(),
-                    "snippet": item.get("Text", "")[:300]
+                    "title": title[:200],
+                    "link": link,
+                    "date": "",
+                    "snippet": snippet[:300],
                 })
-        
-        return results
-    except Exception as e:
-        print(f"⚠️ DuckDuckGo search failed: {str(e)}")
-        return []
+            if len(results) >= max_items:
+                break
+    except Exception as exc:
+        print(f"⚠️ DuckDuckGo web search failed: {exc}")
+
+    return results[:max_items]
 
 def _search_wikipedia(query: str, max_items: int = 3) -> list:
     """Search Wikipedia for factual verification (great for definitions, concepts)."""
