@@ -1,7 +1,7 @@
 import requests
 
 LOCAL_LLAMA_URL = "http://74.208.146.37:8080/v1/chat/completions"
-DEFAULT_SYSTEM_PROMPT = "You are PeakeBot, a helpful AI assistant for the PeakeCoin project."
+DEFAULT_SYSTEM_PROMPT = "You are Harold, a helpful AI assistant for the PeakeCoin project."
 
 
 def ask_local_llama(prompt, system_prompt=None, max_tokens=250):

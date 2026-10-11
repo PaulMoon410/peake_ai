@@ -7,7 +7,7 @@ Your admin panel code is working (✅ verified locally), but Render doesn't have
 
 ### Step 1: Get Your Render Service ID
 1. Go to: https://dashboard.render.com
-2. Click your **PeakeBot** service (blue name at top)
+2. Click your **Harold** service (blue name at top)
 3. In URL bar, copy the ID: `https://dashboard.render.com/services/srv_XXXXXXXXXXXXXXXX`
    - Your service ID is the part after `/services/`
 

@@ -1,4 +1,4 @@
-PeakeBot Render Deployment
+Harold Render Deployment
 
 What you get
 - Public URL access for others through Render
@@ -55,3 +55,5 @@ What admin cannot do:
 - Execute shell commands
 - Edit arbitrary files
 - Run arbitrary Python code
+
+Branding note: The assistant is named Harold. The existing Render service identifier remains `peakebot-web` to avoid creating or renaming a service during this code update.

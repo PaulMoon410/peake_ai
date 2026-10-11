@@ -82,7 +82,7 @@ def index() -> Response:
 <head>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>PeakeBot Web</title>
+  <title>Harold Web</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -179,7 +179,7 @@ def index() -> Response:
       <span class=\"dot d1\"></span>
       <span class=\"dot d2\"></span>
       <span class=\"dot d3\"></span>
-      <span class=\"title\">PeakeBot Public Terminal</span>
+      <span class=\"title\">Harold Public Terminal</span>
     </div>
     <div id=\"log\"></div>
     <div class=\"input\">
@@ -217,7 +217,7 @@ def index() -> Response:
         if (!res.ok) {
           addLine('e', 'Error: ' + (data.error || 'Request failed'));
         } else {
-          addLine('b', 'PeakeBot: ' + data.response);
+          addLine('b', 'Harold: ' + data.response);
         }
       } catch (err) {
         addLine('e', 'Network error: ' + err.message);
@@ -235,7 +235,7 @@ def index() -> Response:
       }
     });
 
-    addLine('b', 'PeakeBot: Online. Ask me anything.');
+    addLine('b', 'Harold: Online. Ask me anything.');
   </script>
 </body>
 </html>
@@ -254,7 +254,7 @@ def admin_index() -> Response:
 <head>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>PeakeBot Admin</title>
+  <title>Harold Admin</title>
   <style>
     :root {
       --bg: #0b1220;
@@ -326,7 +326,7 @@ def admin_index() -> Response:
 </head>
 <body>
   <div class=\"container\">
-    <h1>PeakeBot Admin Panel</h1>
+    <h1>Harold Admin Panel</h1>
     <div class=\"grid\">
       <div class=\"card\">
         <div class=\"row\">
