@@ -106,9 +106,12 @@ class MemoryStore:
     def __init__(self, path: Path, legacy_path: Path | None = None) -> None:
         self.path = path
         self.legacy_path = legacy_path
-        self.ftp_host = os.environ.get("MEMORY_FTP_HOST", "").strip()
-        self.ftp_user = os.environ.get("MEMORY_FTP_USER", "")
-        self.ftp_password = os.environ.get("MEMORY_FTP_PASSWORD", "")
+        self.ftp_host = (os.environ.get("MEMORY_FTP_HOST", "") or os.environ.get("FTP_HOST", "")).strip()
+        self.ftp_user = os.environ.get("MEMORY_FTP_USER", "") or os.environ.get("FTP_USER", "")
+        self.ftp_password = os.environ.get("MEMORY_FTP_PASSWORD", "") or os.environ.get("FTP_PASS", "")
+        self.ftp_base_dir = (
+            os.environ.get("MEMORY_FTP_BASE_DIR", "") or os.environ.get("FTP_BASE_DIR", "")
+        ).strip().strip("/")
         self.remote_path = os.environ.get("MEMORY_FTP_PATH", "pocket-ai-memory.jsonl").strip()
         self.ftp_tls = os.environ.get("MEMORY_FTP_TLS", "").strip().lower() in {"1", "true", "yes"}
         try:
@@ -128,6 +131,8 @@ class MemoryStore:
         if (not re.fullmatch(r"/?[A-Za-z0-9._/-]+", self.remote_path)
             or any(part == ".." for part in self.remote_path.split("/"))):
             raise ValueError("MEMORY_FTP_PATH must be a safe remote file path without '..' segments.")
+        if any(part in {".", ".."} for part in self.ftp_base_dir.split("/") if part):
+            raise ValueError("MEMORY_FTP_BASE_DIR must not contain relative path segments.")
         loaded_records = self._read_local()
         self.records = loaded_records[-self.max_local_records:]
         if len(self.records) != len(loaded_records):
@@ -213,7 +218,8 @@ class MemoryStore:
 
     @property
     def ftp_configured(self) -> bool:
-        return bool(self.ftp_host and self.ftp_user and self.ftp_password)
+        values = (self.ftp_host, self.ftp_user, self.ftp_password)
+        return all(value and not re.fullmatch(r"<REDACTED[^>]*>", value) for value in values)
 
     @property
     def ftp_partially_configured(self) -> bool:
@@ -836,6 +842,8 @@ class MemoryStore:
             client = ftplib.FTP()
         client.connect(self.ftp_host, timeout=20)
         client.login(self.ftp_user, self.ftp_password)
+        if self.ftp_base_dir:
+            client.cwd(self.ftp_base_dir)
         if self.ftp_tls and isinstance(client, ftplib.FTP_TLS):
             client.prot_p()
         if hasattr(client, "set_pasv"):

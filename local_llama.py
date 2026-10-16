@@ -1,6 +1,10 @@
+import os
 import requests
 
-LOCAL_LLAMA_URL = "http://74.208.146.37:8080/v1/chat/completions"
+LOCAL_LLAMA_URL = os.getenv(
+    "LOCAL_LLAMA_URL",
+    "http://74.208.146.37:8080/v1/chat/completions",
+).strip()
 DEFAULT_SYSTEM_PROMPT = "You are Harold, a helpful AI assistant for the PeakeCoin project."
 
 

@@ -5,6 +5,8 @@ What you get
 - Browser chat window at /
 - JSON API at /api/chat
 - Health endpoint at /health
+- One integrated Harold chat: natural conversation, follow-up context, MCF3 memory recall, and answer-first web research
+- Existing Hive bot, admin panel, base knowledge, and FTP learning flows remain in the same service
 
 Important
 - Render free web services do not provide a guaranteed static IP.
@@ -12,8 +14,8 @@ Important
 
 Deploy steps
 1. Push this repo to GitHub.
-2. In Render, create a new Web Service from the repo.
-3. Render will detect render.yaml, then use:
+2. Keep the existing Render Web Service connected to this repo and deploy its main branch.
+3. Render uses the existing render.yaml settings:
    - Build: pip install -r requirements.txt
    - Start: gunicorn -w 1 -k gthread -b 0.0.0.0:$PORT web_app:app
 4. Open your service URL and test.
@@ -44,6 +46,18 @@ Optional FTP runtime variables:
 - FTP_PASS=<your-password>
 - FTP_BASE_DIR=/
 - FTP_UPLOAD_BATCH_SIZE=3
+
+No Render start-command change is needed: the current `web_app:app` process now hosts the integrated experience. The existing PeakeBot/Harold FTP settings are reused; do not put credentials in `render.yaml` or commit them to GitHub.
+
+Pocket AI's MCF3 recall uses the same FTP credentials and base directory, but writes to its own archive file so it does not overwrite the existing PeakeBot archive:
+- Default archive: pocket-ai-memory.jsonl (plus numbered shards as capped files fill)
+- Optional MEMORY_FTP_PATH overrides that archive filename/path.
+- Optional MEMORY_FTP_MAX_BYTES sets the maximum shard size (default 32 KiB; allowed range 1–64 KiB).
+- Render's local working cache is kept under /tmp and retains at most 50 MCF3 records by default; set MEMORY_LOCAL_CACHE_RECORDS to adjust the count.
+- The web chat sends only the current browser conversation's last six turns to the model. New conversations start with a fresh context.
+- Users can explicitly ask Harold to remember a preference or project fact. Do not save passwords, private keys, recovery phrases, or API tokens.
+- Explicit `/search ...` requests and questions the language model cannot answer confidently use the existing multi-source verifier, then ask the model to explain the evidence naturally instead of returning the raw link list.
+- Conversation turns are sent by the browser as untrusted context (limited to six turns); MCF3 retrieval is also added as unverified context. These contexts go to the configured language-model endpoint, so set `LOCAL_LLAMA_URL` to an endpoint you trust and do not enter private secrets in the public chat.
 
 What admin can do safely:
 - Insert base knowledge entries (topic + answer) at runtime

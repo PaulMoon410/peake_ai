@@ -58,6 +58,25 @@ class FakeFtp:
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_uses_existing_render_ftp_environment_settings(self) -> None:
+        env = {
+            "FTP_HOST": "ftp.example.invalid",
+            "FTP_USER": "existing-user",
+            "FTP_PASS": "existing-password",
+            "FTP_BASE_DIR": "/archive/pocketai",
+            "MEMORY_FTP_HOST": "",
+            "MEMORY_FTP_USER": "",
+            "MEMORY_FTP_PASSWORD": "",
+        }
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, env, clear=False):
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+
+            self.assertTrue(store.ftp_configured)
+            self.assertEqual("ftp.example.invalid", store.ftp_host)
+            self.assertEqual("existing-user", store.ftp_user)
+            self.assertEqual("existing-password", store.ftp_password)
+            self.assertEqual("archive/pocketai", store.ftp_base_dir)
+
     def test_add_deduplicates_and_recalls_matching_note(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = MemoryStore(Path(folder) / "memory.jsonl")

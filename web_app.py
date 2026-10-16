@@ -5,6 +5,7 @@ import hmac
 from collections import defaultdict, deque
 from typing import Optional, Tuple
 from flask import Flask, jsonify, request, Response
+from my_ai.conversation import normalize_history
 
 from peakebot import (
   generate_response,
@@ -192,6 +193,7 @@ def index() -> Response:
     const log = document.getElementById('log');
     const promptEl = document.getElementById('prompt');
     const sendBtn = document.getElementById('send');
+    const conversationHistory = [];
 
     function addLine(cls, text) {
       const line = document.createElement('div');
@@ -211,13 +213,18 @@ def index() -> Response:
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({prompt})
+          body: JSON.stringify({prompt, history: conversationHistory.slice(-12)})
         });
         const data = await res.json();
         if (!res.ok) {
           addLine('e', 'Error: ' + (data.error || 'Request failed'));
         } else {
           addLine('b', 'Harold: ' + data.response);
+          conversationHistory.push(
+            {role: 'user', content: prompt},
+            {role: 'assistant', content: data.response}
+          );
+          if (conversationHistory.length > 12) conversationHistory.splice(0, conversationHistory.length - 12);
         }
       } catch (err) {
         addLine('e', 'Network error: ' + err.message);
@@ -586,11 +593,13 @@ def api_chat() -> Response:
     if not _check_rate_limit(client_ip):
         return jsonify({"error": "rate limit exceeded; try again shortly"}), 429
 
+    history = normalize_history(payload.get("history", []))
+
     with _GENERATION_LOCK:
-        try:
-            response = generate_response(prompt)
-        except Exception as exc:
-            return jsonify({"error": f"generation failed: {exc}"}), 500
+      try:
+        response = generate_response(prompt, conversation_history=history)
+      except Exception as exc:
+        return jsonify({"error": f"generation failed: {exc}"}), 500
 
     return jsonify({"response": response})
 
