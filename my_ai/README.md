@@ -23,7 +23,8 @@ curl -fL 'https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/m
 
 ## Commands
 
-- `/search current Python release` searches the web and asks the local model to summarize the results.
+- Ordinary messages are handled as conversation first: the assistant uses recent turns, interprets simple/colloquial wording, and asks a short clarification when important context is missing. It does not automatically browse on every message.
+- `/search current Python release` searches the web, then gives a conversational answer before a short Sources line. Follow-up searches such as `/search what about its memory use` carry forward the previous user topic instead of searching the fragment alone.
 - `/site portfolio | Make a simple portfolio for a beginner programmer` creates `sites/portfolio/index.html`.
 - `/preview portfolio` serves that folder at `http://127.0.0.1:8000` and opens it in a browser.
 - `/learn I prefer Python examples` saves a concise note in `memory.jsonl`; simple rules place it in a category.

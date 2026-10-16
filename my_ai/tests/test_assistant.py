@@ -7,10 +7,45 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from assistant import SearchResults, ftp_configuration_warning, safe_slug
+from assistant import (
+    SearchResults,
+    build_search_answer_prompt,
+    contextual_search_query,
+    ftp_configuration_warning,
+    safe_slug,
+)
 
 
 class AssistantTests(unittest.TestCase):
+    def test_contextual_search_query_resolves_follow_up_with_last_user_topic(self) -> None:
+        history = [("How do I make a Hive bot?", "Start by choosing one safe task.")]
+
+        self.assertEqual(
+            "How do I make a Hive bot? what about Python?",
+            contextual_search_query("what about Python?", history),
+        )
+
+    def test_contextual_search_query_leaves_standalone_search_alone(self) -> None:
+        self.assertEqual(
+            "latest Python release",
+            contextual_search_query("latest Python release", [("Hive bot", "Okay")]),
+        )
+
+    def test_search_answer_prompt_requests_conversation_and_selective_sources(self) -> None:
+        prompt = build_search_answer_prompt(
+            "what about Python?",
+            [
+                {"title": "Python Docs", "snippet": "Official guide.", "url": "https://python.org/docs"},
+                {"title": "Another result", "snippet": "More detail.", "url": "https://example.org"},
+            ],
+            [("How do I make a Hive bot?", "Start with one safe task.")],
+        )
+
+        self.assertIn("How do I make a Hive bot?", prompt)
+        self.assertIn("Give the answer before sources", prompt)
+        self.assertIn("at most three relevant markdown links", prompt)
+        self.assertIn("Do not dump the results as a list of links", prompt)
+
     def test_ftp_warning_identifies_missing_settings_without_showing_values(self) -> None:
         memory = SimpleNamespace(
             ftp_host="ftp.example.test",
