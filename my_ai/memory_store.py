@@ -37,6 +37,116 @@ _STOP_WORDS = {
     "you", "your", "yours", "yourself", "yourselves",
 }
 
+# Curated synonym / related-term map. Expanding query terms with these lets a
+# recall surface conceptually related notes even when the wording differs.
+_SYNONYMS: dict[str, frozenset[str]] = {
+    "python": frozenset({"coding", "program", "programming", "script", "code"}),
+    "coding": frozenset({"python", "program", "programming", "script", "code"}),
+    "program": frozenset({"coding", "python", "programming", "script", "code"}),
+    "programming": frozenset({"coding", "python", "program", "script", "code"}),
+    "script": frozenset({"coding", "python", "program", "programming", "code"}),
+    "code": frozenset({"coding", "python", "program", "programming", "script"}),
+    "happy": frozenset({"joy", "delight", "pleasure", "glad", "cheerful"}),
+    "joy": frozenset({"happy", "delight", "pleasure"}),
+    "delight": frozenset({"happy", "joy", "pleasure"}),
+    "sad": frozenset({"sorrow", "grief", "unhappy", "mourn", "gloomy"}),
+    "grief": frozenset({"sad", "sorrow", "mourn", "bereavement"}),
+    "sorrow": frozenset({"sad", "grief", "mourn"}),
+    "fear": frozenset({"anxiety", "dread", "panic", "worry", "afraid"}),
+    "anxiety": frozenset({"fear", "worry", "dread", "panic"}),
+    "worry": frozenset({"anxiety", "fear", "stress"}),
+    "stress": frozenset({"worry", "anxiety", "pressure", "burnout"}),
+    "burnout": frozenset({"stress", "exhaustion", "fatigue"}),
+    "tired": frozenset({"exhaust", "exhaustion", "fatigue", "weary"}),
+    "exhaust": frozenset({"tired", "exhaustion", "fatigue"}),
+    "love": frozenset({"care", "like", "affection", "cherish"}),
+    "like": frozenset({"love", "care", "prefer", "enjoy"}),
+    "prefer": frozenset({"like", "preference", "preferences", "favor"}),
+    "preference": frozenset({"prefer", "preferences", "like", "favor"}),
+    "preferences": frozenset({"prefer", "preference", "like"}),
+    "remember": frozenset({"recall", "recollect", "memories", "reminisce"}),
+    "memory": frozenset({"memories", "remember", "recollection"}),
+    "memories": frozenset({"memory", "remember", "recollection"}),
+    "learn": frozenset({"study", "understand", "grasp", "master"}),
+    "understand": frozenset({"learn", "comprehend", "grasp"}),
+    "help": frozenset({"assist", "aid", "support"}),
+    "use": frozenset({"utilize", "employ", "apply"}),
+    "make": frozenset({"create", "build", "produce", "craft"}),
+    "build": frozenset({"make", "create", "construct"}),
+    "create": frozenset({"make", "build", "produce"}),
+    "write": frozenset({"compose", "draft", "author"}),
+    "read": frozenset({"peruse", "study", "review"}),
+    "see": frozenset({"view", "watch", "observe", "notice"}),
+    "hear": frozenset({"listen", "sound"}),
+    "feel": frozenset({"sense", "experience", "sensation"}),
+    "think": frozenset({"believe", "consider", "reckon", "ponder"}),
+    "believe": frozenset({"think", "trust", "faith"}),
+    "trust": frozenset({"believe", "rely", "confidence"}),
+    "friend": frozenset({"companion", "pal", "buddy"}),
+    "family": frozenset({"relatives", "kin", "kinfolk"}),
+    "home": frozenset({"house", "dwelling", "residence"}),
+    "work": frozenset({"job", "employment", "career", "labor"}),
+    "job": frozenset({"work", "career", "employment"}),
+    "money": frozenset({"cash", "funds", "finance", "currency"}),
+    "time": frozenset({"moment", "hour", "day", "period"}),
+    "life": frozenset({"existence", "living", "lifetime"}),
+    "health": frozenset({"wellness", "fitness", "wellbeing"}),
+    "illness": frozenset({"sickness", "disease", "ailment"}),
+    "pain": frozenset({"ache", "hurt", "soreness"}),
+    "sleep": frozenset({"rest", "dream", "nap"}),
+    "dream": frozenset({"sleep", "vision", "aspiration"}),
+    "food": frozenset({"meal", "eating", "cooking", "cuisine"}),
+    "eat": frozenset({"food", "dine", "consume", "feed"}),
+    "travel": frozenset({"trip", "journey", "voyage", "tour"}),
+    "city": frozenset({"town", "urban", "metropolis"}),
+    "country": frozenset({"nation", "land", "state"}),
+    "world": frozenset({"earth", "globe", "planet"}),
+    "water": frozenset({"drink", "liquid", "ocean", "sea"}),
+    "fire": frozenset({"flame", "heat", "burn"}),
+    "light": frozenset({"brightness", "glow", "shine"}),
+    "dark": frozenset({"shadow", "dim", "night"}),
+    "night": frozenset({"dark", "evening", "sleep"}),
+    "day": frozenset({"morning", "afternoon", "daylight"}),
+    "morning": frozenset({"day", "dawn", "sunrise"}),
+}
+
+# Common suffixes, longest first. Stripping is only a bonus signal on top of
+# exact/keyword overlap: exact matches are never changed by stemming.
+_STEM_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("sses", "ss"), ("ies", "y"), ("ied", "y"), ("ingly", "ing"),
+    ("edly", "ed"), ("ening", "en"), ("ations", "ation"), ("sions", "sion"),
+    ("tions", "tion"), ("ments", "ment"), ("nesses", "ness"), ("ences", "ence"),
+    ("ances", "ance"), ("ings", "ing"), ("ers", "er"), ("ests", "est"),
+    ("ables", "able"), ("ibles", "ible"), ("ingly", "ing"), ("ingly", "ing"),
+    ("lly", "ly"), ("ingly", "ing"),
+    ("ing", ""), ("ed", ""), ("es", ""), ("s", ""), ("ly", ""), ("er", ""),
+    ("est", ""), ("ment", ""), ("tion", ""), ("sion", ""), ("ness", ""),
+    ("ance", ""), ("ence", ""), ("able", ""), ("ible", ""), ("ive", ""),
+    ("ful", ""), ("ous", ""), ("al", ""),
+)
+
+
+def _stem(word: str) -> str:
+    """Very light stemming used as a bonus recall signal.
+
+    Strips at most one common suffix and never reduces a word below three
+    letters, so exact keyword overlap remains the authoritative match.
+    """
+    w = word.casefold()
+    for suffix, replacement in _STEM_SUFFIXES:
+        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+            return w[: len(w) - len(suffix)] + replacement
+    return w
+
+
+def _expand_terms(terms: set[str]) -> set[str]:
+    """Return terms plus their curated synonyms (query-side expansion)."""
+    expanded: set[str] = set(terms)
+    for term in terms:
+        expanded.update(_SYNONYMS.get(term, ()))
+    return expanded
+
+
 _MAX_NOTE_CHARS = 500
 _MAX_RECORD_BYTES = 4096
 _HARD_REMOTE_MAX_BYTES = 64 * 1024
@@ -140,7 +250,10 @@ class MemoryStore:
         if not self.records and legacy_path and legacy_path.is_file():
             self._import_legacy()
         self._index_path = self.path.with_suffix(".index.sqlite3")
+        self._edges_path = self.path.with_suffix(".mesh.json")
+        self._edges: dict[str, dict[str, str]] = {}
         self._index: sqlite3.Connection | None = None
+        self._load_edges()
         self._open_index()
 
     def _open_index(self) -> None:
@@ -419,6 +532,11 @@ class MemoryStore:
         self._trim_local_cache()
         self._write_local()
         self._rebuild_index()
+        # Wire explicit mesh edges from any rel:<note-id> references in the note.
+        for rel in _REL_RE.findall(final_note):
+            rel = rel.strip()
+            if re.fullmatch(r"[a-fA-F0-9]{12}", rel):
+                self.link(record["i"], rel, "rel")
         return record
 
     def remove(self, target: str) -> dict[str, str] | None:
@@ -451,6 +569,12 @@ class MemoryStore:
 
         removed = self.records.pop(match_idx)
         self._write_local()
+        # Drop mesh edges touching the removed note.
+        if removed["i"] in self._edges:
+            for other in list(self._edges[removed["i"]].keys()):
+                self._edges[other].pop(removed["i"], None)
+            del self._edges[removed["i"]]
+            self._save_edges()
         self._rebuild_index()
         if self.ftp_configured:
             try:
@@ -789,7 +913,18 @@ class MemoryStore:
 
             keywords = set(record.get("k", "").split())
             note_terms = {word.casefold() for word in _WORDS.findall(record["n"])}
-            overlap = len(terms & (keywords | note_terms))
+            record_terms = keywords | note_terms
+
+            # Exact keyword overlap, synonym expansion (linguistic understanding)
+            # and light stemming (morphological variants) each vote; the strongest
+            # signal wins so exact matches are never diluted.
+            overlap = len(terms & record_terms)
+            expanded_overlap = len(_expand_terms(terms) & record_terms)
+            stemmed_overlap = len(
+                {_stem(t) for t in _expand_terms(terms)}
+                & {_stem(w) for w in record_terms}
+            )
+            overlap = max(overlap, expanded_overlap, stemmed_overlap)
 
             if overlap == 0 and record["i"] not in fts_hit_ids and not category_filter:
                 continue
@@ -803,6 +938,8 @@ class MemoryStore:
                 score += 1.0
             if category_filter:
                 score += 3.0
+            # Recency boost: notes appended later (higher index) surface first.
+            score += index * 0.02
 
             scored_records.append((score, index, record))
 
@@ -830,6 +967,184 @@ class MemoryStore:
                 lines.append("  " * depth + f"- {id_tag}{note_str}")
         render(root, 1)
         return "\n".join(lines)
+
+    def consolidate(self, limit: int = 5) -> dict[str, str] | None:
+        """Compress a cluster of related notes into one higher-level memory.
+
+        Finds the largest connected group of notes sharing vocabulary, writes a
+        single synthesis note under Harold/Understanding/Consolidated, and
+        returns it. The source notes are left intact; this adds a compressed
+        layer so distant but related memories recall together.
+        """
+        if len(self.records) < 2:
+            return None
+
+        # Build adjacency via shared non-stopword vocabulary.
+        adjacency: dict[str, set[str]] = {r["i"]: set() for r in self.records}
+        term_index: dict[str, set[str]] = {}
+        for record in self.records:
+            terms = {
+                word.casefold() for word in _WORDS.findall(record["n"])
+                if len(word) > 1 and word.casefold() not in _STOP_WORDS
+            }
+            terms.update(record.get("k", "").split())
+            for term in terms:
+                term_index.setdefault(term, set()).add(record["i"])
+        for ids in term_index.values():
+            ids = list(ids)
+            for i in range(len(ids)):
+                for j in range(i + 1, len(ids)):
+                    adjacency[ids[i]].add(ids[j])
+                    adjacency[ids[j]].add(ids[i])
+
+        # Largest connected component.
+        seen: set[str] = set()
+        best: list[str] = []
+        for start in adjacency:
+            if start in seen:
+                continue
+            stack = [start]
+            component: list[str] = []
+            seen.add(start)
+            while stack:
+                node = stack.pop()
+                component.append(node)
+                for neighbor in adjacency[node]:
+                    if neighbor not in seen:
+                        seen.add(neighbor)
+                        stack.append(neighbor)
+            if len(component) > len(best):
+                best = component
+
+        if len(best) < 2:
+            return None
+
+        members = [r for r in self.records if r["i"] in best]
+        members.sort(key=lambda r: r.get("d", ""))
+        joined = " ".join(record["n"] for record in members)
+        collapsed = " ".join(joined.split())
+        if len(collapsed) > _MAX_NOTE_CHARS - 40:
+            clipped = collapsed[: _MAX_NOTE_CHARS - 40]
+            if " " in clipped:
+                clipped = clipped[: clipped.rfind(" ")]
+            collapsed = clipped.rstrip(" ,;:-") + "…"
+        note = f"Consolidated understanding from {len(members)} note(s): {collapsed}"
+
+        try:
+            return self.add(
+                note, category="Harold/Understanding/Consolidated",
+            )
+        except ValueError:
+            return None
+
+    # -- mesh net -----------------------------------------------------------
+    def _load_edges(self) -> None:
+        """Load the compact mesh adjacency from the sidecar JSON file."""
+        self._edges: dict[str, dict[str, str]] = {}
+        try:
+            raw = self._edges_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        for source, targets in data.items():
+            if not isinstance(targets, dict):
+                continue
+            self._edges[str(source)] = {str(t): str(r) for t, r in targets.items()}
+
+    def _save_edges(self) -> None:
+        """Persist the mesh adjacency as compact JSON."""
+        self._edges_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._edges_path.with_name(self._edges_path.name + ".tmp")
+        with temporary.open("w", encoding="utf-8", newline="\n") as output:
+            json.dump(self._edges, output, ensure_ascii=False, separators=(",", ":"))
+        os.replace(temporary, self._edges_path)
+
+    def link(self, source_id: str, target_id: str, relation: str = "related") -> None:
+        """Create a bidirectional mesh edge between two notes."""
+        source_id = source_id.strip()
+        target_id = target_id.strip()
+        if not source_id or not target_id or source_id == target_id:
+            return
+        self._edges.setdefault(source_id, {})[target_id] = relation
+        self._edges.setdefault(target_id, {})[source_id] = relation
+        self._save_edges()
+
+    def unlink(self, source_id: str, target_id: str) -> None:
+        """Remove a mesh edge between two notes."""
+        for side, other in ((source_id, target_id), (target_id, source_id)):
+            targets = self._edges.get(side)
+            if targets and other in targets:
+                del targets[other]
+        self._save_edges()
+
+    def neighbors(self, node_id: str) -> list[tuple[str, str]]:
+        """Return (neighbor_id, relation) pairs for a mesh node."""
+        return [(nid, rel) for nid, rel in self._edges.get(node_id, {}).items()]
+
+    def _mesh_bfs(self, seeds: list[str], depth: int = 2) -> list[str]:
+        """Traverse the mesh from seed node ids, breadth-first, up to depth."""
+        seen: set[str] = set(seeds)
+        frontier = list(seeds)
+        ordered: list[str] = []
+        for _ in range(max(0, depth)):
+            next_frontier: list[str] = []
+            for node in frontier:
+                for neighbor, _ in self.neighbors(node):
+                    if neighbor not in seen:
+                        seen.add(neighbor)
+                        next_frontier.append(neighbor)
+                        ordered.append(neighbor)
+            if not next_frontier:
+                break
+            frontier = next_frontier
+        return ordered
+
+    def mesh_recall(
+        self, query: str, limit: int = 8, max_chars: int = 1800,
+    ) -> str:
+        """Recall notes by keyword, then expand through the mesh graph.
+
+        Seed notes come from keyword/FTS recall; the mesh then pulls in
+        directly linked notes so a cluster of related facts surfaces together.
+        """
+        cat_filter, tags, _, clean_query = MemoryLanguage.parse_query(query)
+        query_terms = {
+            word.casefold() for word in _WORDS.findall(clean_query)
+            if len(word) > 1 and word.casefold() not in _STOP_WORDS
+        }
+        for tag in tags:
+            query_terms.add(tag)
+        if not query_terms:
+            return ""
+
+        seeds = [r["i"] for r in self._find_records(query_terms, limit, clean_query, category_filter=cat_filter)]
+        if not seeds:
+            return ""
+
+        mesh_order = self._mesh_bfs(seeds, depth=2)
+        ordered_ids = seeds + [nid for nid in mesh_order if nid not in seeds]
+        by_id = {record["i"]: record for record in self.records}
+
+        selected: list[str] = []
+        used = 0
+        for node_id in ordered_ids:
+            record = by_id.get(node_id)
+            if record is None:
+                continue
+            provenance = f"; saved {record.get('d', 'date unknown')}; {record['v']}"
+            provenance += f"; source {record['s']}" if record.get("s") else ""
+            line = f"- [{record.get('c', 'Knowledge')}{provenance}] {record['n']}"
+            extra = len(line) + (1 if selected else 0)
+            if used + extra > max_chars:
+                continue
+            selected.append(line)
+            used += extra
+        return "\n".join(selected)
 
     def _connect(self) -> ftplib.FTP:
         if not self.ftp_configured:

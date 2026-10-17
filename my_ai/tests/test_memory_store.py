@@ -310,6 +310,115 @@ Notes are stored in compact JSON Lines format.
             self.assertEqual(["bbbbbbbbbbbb"], [record["i"] for record in remaining])
             self.assertNotIn("pocket-ai-memory.jsonl.000001", ftp.files)
 
+    def test_synonym_expansion_recalls_conceptually_related_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            store.add("I prefer concise Python code")
+            store.add("I love coding every day")
+            store.add("The weather is sunny today")
+
+            # "programming" is a synonym of "python"/"coding", so it should surface
+            # the programming notes.
+            recalled = store.relevant("programming")
+            self.assertIn("concise Python code", recalled)
+            self.assertIn("love coding", recalled)
+
+    def test_stemming_bonus_matches_morphological_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            store.add("I prefer concise Python code")
+
+            # "preferences" is a morphological variant of "prefer".
+            recalled = store.relevant("preferences")
+            self.assertIn("concise Python code", recalled)
+
+    def test_stopword_safety_unchanged_by_synonyms(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            store.add("I love it when it rains in April")
+
+            # "true" has no synonyms and is not in the note.
+            self.assertEqual("", store.relevant("Is it true?"))
+
+    def test_recency_boost_puts_newest_note_first(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            store.add("First older note about rain")
+            store.add("Second newer note about rain")
+
+            recalled = store.relevant("rain")
+            first = recalled.splitlines()[0]
+            self.assertIn("newer", first)
+
+    def test_consolidate_compresses_related_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            store.add("Grief feels like a heavy weight after loss",
+                      category="Harold/Observations/Emotions")
+            store.add("Grief can come in waves over many months",
+                      category="Harold/Observations/Emotions")
+            store.add("Unrelated note about cooking", category="Docs/Cooking")
+
+            record = store.consolidate()
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual("Harold/Understanding/Consolidated", record["c"])
+            self.assertIn("Consolidated understanding from 2 note(s)", record["n"])
+            self.assertNotIn("cooking", record["n"])
+
+    def test_consolidate_returns_none_with_fewer_than_two_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            store.add("Only one note")
+            self.assertIsNone(store.consolidate())
+
+    def test_mesh_link_and_neighbors(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            first = store.add("Grief feels like a heavy weight")
+            second = store.add("Grief can come in waves")
+            assert first and second
+            store.link(first["i"], second["i"], "rel")
+            neigh = store.neighbors(first["i"])
+            self.assertEqual(len(neigh), 1)
+            self.assertEqual(neigh[0][0], second["i"])
+            self.assertEqual(neigh[0][1], "rel")
+            # Bidirectional.
+            self.assertEqual(store.neighbors(second["i"])[0][0], first["i"])
+
+    def test_mesh_recall_expands_through_links(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            first = store.add("I prefer concise Python code")
+            second = store.add("I love coding in Python every day")
+            assert first and second
+            store.link(first["i"], second["i"], "rel")
+
+            recalled = store.mesh_recall("programming")
+            self.assertIn("concise Python code", recalled)
+            self.assertIn("love coding", recalled)
+
+    def test_unlink_removes_mesh_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            first = store.add("First note")
+            second = store.add("Second note")
+            assert first and second
+            store.link(first["i"], second["i"], "rel")
+            store.unlink(first["i"], second["i"])
+            self.assertEqual(store.neighbors(first["i"]), [])
+            self.assertEqual(store.neighbors(second["i"]), [])
+
+    def test_remove_cleans_up_mesh_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            first = store.add("First note")
+            second = store.add("Second note")
+            assert first and second
+            store.link(first["i"], second["i"], "rel")
+            store.remove(first["i"])
+            self.assertEqual(store.neighbors(second["i"]), [])
+
 
 if __name__ == "__main__":
     unittest.main()
