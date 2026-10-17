@@ -42,11 +42,13 @@ from bot_builder import generate_bot, list_templates
 from coding_agent import run_coding_agent
 from math_learner import MathLearner
 from memory_store import MemoryLanguage, MemoryStore
-
+from games import Game, GAMES, create as create_game, list_games
 
 ROOT = Path(__file__).resolve().parent
 MEMORY = MemoryStore(ROOT / "memory.jsonl", ROOT / "memory.md")
 MATH = MathLearner(MEMORY)
+ACTIVE_GAME: Game | None = None
+GAME_NAMES = {k: v.__name__ for k, v in GAMES.items() if len(k) > 3}
 SITES_DIR = ROOT / "sites"
 MODEL = "Qwen2.5-Coder 0.5B"
 MODEL_FILE = Path(os.environ.get(
@@ -306,6 +308,7 @@ def show_help() -> None:
     /code TASK                    Coding agent via Ollama; edits and tests need approval
   /memory                      Show categorized memory folder tree
   /math                        Learn/recall a math fact (verifies simple arithmetic)
+  /game                        Play tictactoe, hangman, checkers, or chess
   /check                       Check model, recall, and a small reasoning probe
     /sync                        Merge FTP shards into the bounded local cache
   /help                        Show these commands
@@ -631,6 +634,35 @@ def main() -> int:
             status = "verified" if fact and fact.verified else "stored"
             print(f"AI> {line_for_learning} = {math_expr} ({status})")
             history.append((line, f"{line_for_learning} = {math_expr}"))
+            continue
+
+        if line.startswith("/game"):
+            global ACTIVE_GAME
+            value = line[len("/game"):].strip()
+            if not value or value in {"list", "?"}:
+                names = ", ".join(sorted({k for k in GAME_NAMES if len(k) > 3}))
+                if ACTIVE_GAME is not None:
+                    print(f"Active game: {ACTIVE_GAME.name}.")
+                print(f"Available games: {names}.")
+                print("Usage: /game <name>   to start; /game stop to end. Then type moves.")
+                continue
+            if value in {"stop", "quit", "exit"}:
+                ACTIVE_GAME = None
+                print("Game stopped.")
+                continue
+            if ACTIVE_GAME is not None:
+                print(f"A {ACTIVE_GAME.name} game is already in progress. Use /game stop to end it, or make a move.")
+                continue
+            game = create_game(value)
+            if game is None:
+                print(f"Unknown game '{value}'. Available: {', '.join(sorted({k for k in GAME_NAMES if len(k) > 3}))}.")
+                continue
+            ACTIVE_GAME = game
+            print("AI> " + game.start())
+            continue
+
+        if ACTIVE_GAME is not None:
+            print("AI> " + ACTIVE_GAME.move(line))
             continue
 
         context = "\n".join(f"You: {u}\nAssistant: {a}" for u, a in history[-3:])
