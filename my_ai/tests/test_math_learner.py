@@ -53,6 +53,22 @@ class MathLearnerTests(unittest.TestCase):
             self.assertEqual(learner.evaluate("10 / 2"), "5")
             self.assertIsNone(learner.evaluate("not math"))
 
+    def test_natural_language_number_is_not_marked_as_verified_arithmetic(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            learner = MathLearner(MemoryStore(Path(folder) / "memory.jsonl"))
+
+            fact = learner.learn("A triangle has 3 sides")
+
+            self.assertIsNotNone(fact)
+            assert fact is not None
+            self.assertFalse(fact.verified)
+
+    def test_evaluator_rejects_power_operator_without_computing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            learner = MathLearner(MemoryStore(Path(folder) / "memory.jsonl"))
+
+            self.assertIsNone(learner.evaluate("2 ** 1000000000"))
+
     def test_learn_persists_across_stores(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "memory.jsonl"

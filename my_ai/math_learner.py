@@ -7,14 +7,22 @@ category so they can be recalled and built on across sessions.
 
 from __future__ import annotations
 
+import ast
+import math
 import re
 from dataclasses import dataclass
 
-from memory_store import MemoryStore
+if __package__:
+    from .memory_store import MemoryStore
+else:
+    from memory_store import MemoryStore
 
 
 _EXPR_RE = re.compile(r"^[0-9\s\+\-\*\/\(\)\.]+$")
 _MATH_CATEGORY = "Math"
+_MAX_EXPRESSION_CHARS = 256
+_MAX_EXPRESSION_NODES = 64
+_MAX_RESULT_MAGNITUDE = 1e100
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,10 +47,7 @@ class MathLearner:
             return None
         verified, result = self._verify(cleaned)
         note = f"{cleaned} = {result}" + (" (unverified)" if not verified else "")
-        try:
-            self.store.add(note, category=_MATH_CATEGORY)
-        except ValueError:
-            pass
+        self.store.add(note, category=_MATH_CATEGORY)
         return MathFact(expression=cleaned, result=result, verified=verified)
 
     def recall(self, query: str, limit: int = 8) -> str:
@@ -77,11 +82,15 @@ class MathLearner:
         for word, symbol in (("divided by", "/"), ("plus", "+"), ("minus", "-"), ("times", "*")):
             expr = expr.replace(word, symbol)
         expr = expr.replace("x", "*").replace("X", "*").replace("÷", "/")
-        expr = re.sub(r"[^0-9\s\+\-\*\/\(\)\.]", "", expr)
-        if not _EXPR_RE.match(expr.strip()):
+        expr = expr.strip()
+        if len(expr) > _MAX_EXPRESSION_CHARS or not _EXPR_RE.fullmatch(expr):
             return False, statement
         try:
-            value = eval(expr, {"__builtins__": {}}, {})
+            parsed = ast.parse(expr, mode="eval")
+            nodes = list(ast.walk(parsed))
+            if len(nodes) > _MAX_EXPRESSION_NODES:
+                return False, statement
+            value = MathLearner._evaluate_node(parsed.body)
         except Exception:
             return False, statement
         if isinstance(value, float):
@@ -89,3 +98,34 @@ class MathLearner:
         else:
             result = str(value)
         return True, result
+
+    @staticmethod
+    def _evaluate_node(node: ast.expr) -> int | float:
+        """Evaluate only bounded numeric literals and basic arithmetic AST nodes."""
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+            value = node.value
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            operand = MathLearner._evaluate_node(node.operand)
+            value = operand if isinstance(node.op, ast.UAdd) else -operand
+        elif isinstance(node, ast.BinOp):
+            left = MathLearner._evaluate_node(node.left)
+            right = MathLearner._evaluate_node(node.right)
+            if isinstance(node.op, ast.Add):
+                value = left + right
+            elif isinstance(node.op, ast.Sub):
+                value = left - right
+            elif isinstance(node.op, ast.Mult):
+                value = left * right
+            elif isinstance(node.op, ast.Div):
+                value = left / right
+            else:
+                raise ValueError("Unsupported arithmetic operator")
+        else:
+            raise ValueError("Unsupported arithmetic expression")
+
+        if isinstance(value, int):
+            if value.bit_length() > 334:
+                raise ValueError("Arithmetic result is too large")
+        elif not math.isfinite(value) or abs(value) > _MAX_RESULT_MAGNITUDE:
+            raise ValueError("Arithmetic result is not finite or is too large")
+        return value

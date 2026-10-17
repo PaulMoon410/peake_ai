@@ -21,6 +21,7 @@ from my_ai.conversation import (
     normalize_history,
     research_answer_system_prompt,
 )
+from my_ai.math_learner import MathLearner
 from my_ai.memory_store import MemoryStore
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus, urlparse
@@ -1812,10 +1813,130 @@ _EXPLICIT_MEMORY_RE = re.compile(
     r"^(?:please\s+)?(?:remember(?:\s+that)?|keep\s+in\s+mind(?:\s+that)?|note(?:\s+that)?)\s*[:,-]?\s*(.+)$",
     re.IGNORECASE,
 )
+_MATH_LEARN_RE = re.compile(
+    r"^(?:please\s+)?(?:learn(?:\s+(?:this|the))?\s+(?:math(?:\s+(?:fact|equation|formula))?|equation|formula)|"
+    r"remember\s+(?:this|the)\s+(?:math(?:\s+(?:fact|equation|formula))?|equation|formula))"
+    r"\s*[:,-]?\s*(.+)$",
+    re.IGNORECASE,
+)
+_MATH_RECALL_RE = re.compile(
+    r"^(?:please\s+)?(?:recall|show|list)\s+(?:my\s+)?math(?:\s+(?:facts?|notes?))?"
+    r"(?:\s+(?:about|for|on)\s+(.+))?\??$",
+    re.IGNORECASE,
+)
+_MATH_RECALL_PREFIX_RE = re.compile(r"^(?:math\s+recall|recall\s+math)\s*[:,-]?\s*(.*)$", re.IGNORECASE)
+_MATH_CALCULATE_RE = re.compile(
+    r"^(?:please\s+)?(?:calculate|compute|solve)\s*[:,-]?\s*(.+?)\??$",
+    re.IGNORECASE,
+)
+_MATH_WHAT_IS_RE = re.compile(r"^(?:what\s+is|what's)\s+(.+?)\??$", re.IGNORECASE)
+_MATH_TOKENS_RE = re.compile(
+    r"\d+(?:\.\d+)?|divided\s+by|plus|minus|times|[()+*/-]|x|÷",
+    re.IGNORECASE,
+)
 _SENSITIVE_MEMORY_RE = re.compile(
     r"\b(?:password|passphrase|private\s+key|seed\s+phrase|recovery\s+phrase|secret\s+key|api\s+token)\b",
     re.IGNORECASE,
 )
+
+
+def _is_simple_math_expression(expression: str) -> bool:
+    """Accept only complete arithmetic expressions before passing to the evaluator."""
+    tokens = _MATH_TOKENS_RE.findall(expression)
+    compact_expression = re.sub(r"\s+", "", expression.casefold())
+    compact_tokens = re.sub(r"\s+", "", "".join(tokens).casefold())
+    return (
+        bool(tokens)
+        and compact_tokens == compact_expression
+        and any(character.isdigit() for character in expression)
+        and bool(re.search(r"[+*/÷-]|\b(?:plus|minus|times|divided\s+by|x)\b", expression, re.IGNORECASE))
+    )
+
+
+def _handle_math_request(prompt: str) -> str | None:
+    """Handle explicit math learning/recall and simple arithmetic in web chat."""
+    raw = prompt.strip()
+    learn_match = _MATH_LEARN_RE.match(raw)
+    if learn_match:
+        statement = learn_match.group(1).strip()
+        if len(statement) > 400:
+            return "That math note is too long to save. Please shorten it and try again."
+        return _learn_math_statement(statement)
+
+    recall_match = _MATH_RECALL_PREFIX_RE.match(raw)
+    if recall_match:
+        return _recall_math_notes(recall_match.group(1).strip())
+    recall_match = _MATH_RECALL_RE.match(raw)
+    if recall_match:
+        return _recall_math_notes((recall_match.group(1) or "").strip())
+
+    expression = ""
+    calculate_match = _MATH_CALCULATE_RE.match(raw)
+    if calculate_match:
+        expression = calculate_match.group(1).strip()
+    else:
+        what_is_match = _MATH_WHAT_IS_RE.match(raw)
+        if what_is_match:
+            expression = what_is_match.group(1).strip()
+        elif _is_simple_math_expression(raw):
+            expression = raw
+
+    if expression and _is_simple_math_expression(expression):
+        return _learn_math_statement(expression)
+    return None
+
+
+def _learn_math_statement(statement: str) -> str:
+    """Store a math fact and upload newly added notes when FTP is available."""
+    store = _get_mcf_memory_store()
+    existing_ids = {record["i"] for record in store.records}
+    try:
+        fact = MathLearner(store).learn(statement)
+    except Exception as exc:
+        print(f"⚠️ Math learning failed: {exc}")
+        return "I couldn't save that math note right now. Please try again."
+    if fact is None:
+        return "Please provide a math expression or fact to learn."
+
+    new_records = [record for record in store.records if record["i"] not in existing_ids]
+    if not new_records:
+        if fact.verified:
+            return f"I already have this verified arithmetic in math memory: {fact.expression} = {fact.result}."
+        return f"I already have this statement in math memory as unverified: {fact.expression}."
+
+    storage_status = "It is saved in this instance's local math memory."
+    if store.ftp_configured:
+        try:
+            store.upload(new_records[-1])
+            storage_status = "It is saved to the shared math memory."
+        except Exception as exc:
+            print(f"⚠️ Math FTP upload failed: {exc}")
+            storage_status = "It is only in this instance's local cache because shared FTP sync failed."
+
+    if fact.verified:
+        return f"Verified arithmetic: {fact.expression} = {fact.result}. {storage_status}"
+    return (
+        f"Saved as an unverified math note: {fact.expression}. "
+        f"I haven't independently verified that statement. {storage_status}"
+    )
+
+
+def _recall_math_notes(query: str) -> str:
+    """Search the shared Math category first, then fall back to the local cache."""
+    if not query:
+        return "Which math topic should I look up? For example: 'recall math: circles'."
+    store = _get_mcf_memory_store()
+    notes = ""
+    if store.ftp_configured:
+        try:
+            notes = store.relevant_remote(f"cat:Math {query}".strip(), limit=6, max_chars=1400)
+        except Exception as exc:
+            print(f"⚠️ Shared math recall failed: {exc}")
+    if not notes:
+        notes = MathLearner(store).recall(query, limit=6)
+    if notes:
+        return "Here's what I have in math memory:\n" + notes
+    return "I don't have a matching math note saved yet. You can teach me with 'learn math: ...'."
 
 
 def _save_explicit_mcf_memory(prompt: str) -> str | None:
@@ -1891,6 +2012,11 @@ def generate_response(prompt, conversation_history=None):
     history = normalize_history(conversation_history)
     if not raw_prompt:
         return "Please type a message, and I will help."
+
+    math_response = _handle_math_request(raw_prompt)
+    if math_response is not None:
+        remember(raw_prompt, math_response)
+        return math_response
 
     saved_response = _save_explicit_mcf_memory(raw_prompt)
     if saved_response is not None:

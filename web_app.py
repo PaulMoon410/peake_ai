@@ -187,13 +187,12 @@ def index() -> Response:
       <textarea id=\"prompt\" placeholder=\"Type your message...\"></textarea>
       <button id=\"send\">Send</button>
     </div>
-    <div class=\"hint\">Public test instance. Avoid sensitive data.</div>
+    <div class=\"hint\">Try “learn math: 2 + 2”, “what is 2 + 2?”, or “recall math: circles”. Avoid sensitive data.</div>
   </div>
   <script>
     const log = document.getElementById('log');
     const promptEl = document.getElementById('prompt');
     const sendBtn = document.getElementById('send');
-    const conversationHistory = [];
 
     function addLine(cls, text) {
       const line = document.createElement('div');
