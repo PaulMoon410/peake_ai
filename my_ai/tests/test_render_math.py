@@ -28,6 +28,11 @@ class RenderMathTests(unittest.TestCase):
     def make_store(self, folder: str) -> MemoryStore:
         return MemoryStore(Path(folder) / "memory.jsonl")
 
+    def test_chat_page_declares_conversation_history(self) -> None:
+        page_source = (ROOT / "web_app.py").read_text(encoding="utf-8")
+
+        self.assertIn("const conversationHistory = [];", page_source)
+
     def test_chat_calculates_and_saves_math_fact(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = self.make_store(folder)

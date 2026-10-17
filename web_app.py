@@ -193,6 +193,7 @@ def index() -> Response:
     const log = document.getElementById('log');
     const promptEl = document.getElementById('prompt');
     const sendBtn = document.getElementById('send');
+    const conversationHistory = [];
 
     function addLine(cls, text) {
       const line = document.createElement('div');
