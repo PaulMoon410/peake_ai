@@ -40,11 +40,13 @@ except (ImportError, Exception):
 
 from bot_builder import generate_bot, list_templates
 from coding_agent import run_coding_agent
+from math_learner import MathLearner
 from memory_store import MemoryLanguage, MemoryStore
 
 
 ROOT = Path(__file__).resolve().parent
 MEMORY = MemoryStore(ROOT / "memory.jsonl", ROOT / "memory.md")
+MATH = MathLearner(MEMORY)
 SITES_DIR = ROOT / "sites"
 MODEL = "Qwen2.5-Coder 0.5B"
 MODEL_FILE = Path(os.environ.get(
@@ -224,9 +226,9 @@ def ask_model(prompt: str, system: str = SYSTEM, query_for_memory: str | None = 
             try:
                 notes = MEMORY.relevant_remote(search_target)
             except Exception:
-                notes = MEMORY.relevant(search_target)
+                notes = MEMORY.mesh_recall(search_target)
         else:
-            notes = MEMORY.relevant(search_target)
+            notes = MEMORY.mesh_recall(search_target)
 
     full_system = system + (
         "\n\nRelevant saved notes (RELATED entries are associative leads, not verified conclusions):\n" + notes
@@ -303,6 +305,7 @@ def show_help() -> None:
   /bot create TYPE NAME        Generate a ready-to-run Hive bot into my_ai/bots/NAME
     /code TASK                    Coding agent via Ollama; edits and tests need approval
   /memory                      Show categorized memory folder tree
+  /math                        Learn/recall a math fact (verifies simple arithmetic)
   /check                       Check model, recall, and a small reasoning probe
     /sync                        Merge FTP shards into the bounded local cache
   /help                        Show these commands
@@ -515,6 +518,22 @@ def main() -> int:
                 print(f"Memory sync complete: {remote_added} downloaded, {uploaded} uploaded.")
             except Exception as exc:
                 print(f"Memory sync failed: {exc}")
+            continue
+
+        if line.startswith("/math"):
+            value = line[len("/math"):].strip()
+            if not value:
+                print("Usage: /math <expression or statement>  (e.g. /math 2 + 2, /math area = pi r squared)")
+                continue
+            try:
+                fact = MATH.learn(value)
+                if fact is None:
+                    print("I couldn't parse that as a math statement.")
+                    continue
+                status = "verified" if fact.verified else "stored (unverified)"
+                print(f"Math [{status}]: {fact.expression} = {fact.result}")
+            except Exception as exc:
+                print(f"Math failed: {exc}")
             continue
 
         if line.startswith("/search "):
