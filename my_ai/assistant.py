@@ -611,6 +611,28 @@ def main() -> int:
                         pass
                 break
 
+        # Auto-detect and solve simple math in natural conversation.
+        math_expr = MATH.evaluate(line)
+        if math_expr is None:
+            # Try to pull a math expression out of a sentence like "what is 1 + 1 = ?"
+            for chunk in re.findall(r"[0-9][0-9\s\+\-\*\/\(\)\.]*", line):
+                chunk = chunk.strip()
+                if chunk and any(op in chunk for op in "+-*/"):
+                    math_expr = MATH.evaluate(chunk)
+                    if math_expr is not None:
+                        line_for_learning = chunk
+                        break
+            else:
+                line_for_learning = line
+        else:
+            line_for_learning = line
+        if math_expr is not None:
+            fact = MATH.learn(line_for_learning)
+            status = "verified" if fact and fact.verified else "stored"
+            print(f"AI> {line_for_learning} = {math_expr} ({status})")
+            history.append((line, f"{line_for_learning} = {math_expr}"))
+            continue
+
         context = "\n".join(f"You: {u}\nAssistant: {a}" for u, a in history[-3:])
         prompt = (context + "\n" if context else "") + "You: " + line + "\nAssistant:"
         try:
