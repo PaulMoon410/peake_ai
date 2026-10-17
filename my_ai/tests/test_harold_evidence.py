@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import ANY, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -61,6 +62,25 @@ class HaroldEvidenceTests(unittest.TestCase):
             self.assertEqual(4, len(report.pages))
             with self.assertRaisesRegex(ValueError, "two to 4"):
                 researcher.learn("sleep", urls + ["https://five.example.info/sleep"])
+
+    def test_uploads_all_source_excerpts_in_one_batch(self) -> None:
+        passage = "Sleep supports attention, learning, and memory during demanding everyday activities."
+        html = f"<main><p>{passage}</p></main>"
+        urls = ["https://one.example.com/sleep", "https://two.example.net/sleep"]
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            store.ftp_host = "ftp.example.test"
+            store.ftp_user = "test-user"
+            store.ftp_password = "test-password"
+            researcher = SourceResearcher(store, FakeEvidenceFetcher({url: html for url in urls}))  # type: ignore[arg-type]
+
+            with patch.object(store, "upload_many", return_value=2) as upload_many:
+                report = researcher.learn("sleep", urls)
+
+            upload_many.assert_called_once_with(ANY, timeout=5.0)
+            records = upload_many.call_args.args[0]
+            self.assertEqual({*urls}, {record["s"] for record in records})
+            self.assertEqual(2, report.notes_uploaded)
 
     def test_refuses_two_sources_from_the_same_registrable_domain(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

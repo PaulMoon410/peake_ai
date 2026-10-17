@@ -102,39 +102,65 @@ class SourceResearcher:
             if len(token) > 2 and token not in _STOP_WORDS
         }
         category = "Harold/Research/" + re.sub(r"[^A-Za-z0-9_-]+", "-", cleaned_topic).strip("-")[:48]
-        pages: list[SourcePage] = []
+        results: list[tuple[SourcePage, list[dict[str, str]]]] = []
         for url in urls:
-            pages.append(self._read_source(url, topic_terms, category))
+            results.append(self._read_source(url, topic_terms, category))
+
+        pending_by_page = [records for _, records in results]
+        pending_uploads = [record for records in pending_by_page for record in records]
+        uploaded = 0
+        if pending_uploads and getattr(self.store, "ftp_configured", False):
+            try:
+                uploaded = self.store.upload_many(pending_uploads, timeout=5.0)  # type: ignore[attr-defined]
+            except Exception:
+                uploaded = 0
+
+        pages: list[SourcePage] = []
+        upload_offset = 0
+        for page, page_records in results:
+            page_uploaded = min(len(page_records), max(0, uploaded - upload_offset))
+            upload_offset += len(page_records)
+            pages.append(SourcePage(
+                url=page.url,
+                title=page.title,
+                excerpts=page.excerpts,
+                notes_added=page.notes_added,
+                notes_uploaded=page_uploaded,
+                detail=page.detail,
+            ))
         corroborations = self._compare_pages(pages)
         return SourceResearchReport(cleaned_topic, tuple(pages), tuple(corroborations))
 
-    def _read_source(self, url: str, topic_terms: set[str], category: str) -> SourcePage:
+    def _read_source(
+        self, url: str, topic_terms: set[str], category: str,
+    ) -> tuple[SourcePage, list[dict[str, str]]]:
         try:
             fetched = self.fetcher.page(url)
             page = html_to_text(fetched.text, url=fetched.url, max_chars=12000)
         except (FetchError, UrlRejected, OSError, ValueError) as exc:
-            return SourcePage(url=url, title="", excerpts=(), notes_added=0,
-                              notes_uploaded=0, detail=f"read refused: {exc}")
+            return (
+                SourcePage(url=url, title="", excerpts=(), notes_added=0,
+                           notes_uploaded=0, detail=f"read refused: {exc}"),
+                [],
+            )
 
         excerpts = self._select_excerpts(page.text, topic_terms)
         added = 0
-        uploaded = 0
+        records: list[dict[str, str]] = []
         for excerpt in excerpts:
             try:
                 record = self.store.add(excerpt, category=category, source=fetched.url)  # type: ignore[attr-defined]
             except (OSError, ValueError) as exc:
-                return SourcePage(fetched.url, page.title, tuple(excerpts), added, uploaded,
-                                  f"could not save all excerpts: {exc}")
+                return (
+                    SourcePage(fetched.url, page.title, tuple(excerpts), added, 0,
+                               f"could not save all excerpts: {exc}"),
+                    records,
+                )
             if record is None:
                 continue
             added += 1
-            if getattr(self.store, "ftp_configured", False):
-                try:
-                    self.store.upload(record)  # type: ignore[attr-defined]
-                    uploaded += 1
-                except Exception:
-                    pass
-        return SourcePage(fetched.url, page.title, tuple(excerpts), added, uploaded)
+            records.append(record)
+        return SourcePage(fetched.url, page.title, tuple(excerpts), added, 0), records
 
     @staticmethod
     def _select_excerpts(text: str, topic_terms: set[str]) -> list[str]:

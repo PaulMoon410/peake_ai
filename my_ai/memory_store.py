@@ -1152,7 +1152,7 @@ class MemoryStore:
             used += extra
         return "\n".join(selected)
 
-    def _connect(self) -> ftplib.FTP:
+    def _connect(self, timeout: float = 20.0) -> ftplib.FTP:
         if not self.ftp_configured:
             if self.ftp_partially_configured:
                 raise RuntimeError("Set MEMORY_FTP_HOST, MEMORY_FTP_USER, and MEMORY_FTP_PASSWORD to enable sync.")
@@ -1161,7 +1161,7 @@ class MemoryStore:
             client: ftplib.FTP = ftplib.FTP_TLS(context=ssl.create_default_context())
         else:
             client = ftplib.FTP()
-        client.connect(self.ftp_host, timeout=20)
+        client.connect(self.ftp_host, timeout=timeout)
         client.login(self.ftp_user, self.ftp_password)
         if self.ftp_base_dir:
             client.cwd(self.ftp_base_dir)
@@ -1247,15 +1247,22 @@ class MemoryStore:
 
     def upload(self, record: dict[str, str]) -> None:
         """Append one note to the current capped FTP shard or create the next shard."""
-        payload = self._encode_record(record)
-        client = self._connect()
+        self.upload_many([record])
+
+    def upload_many(self, records: list[dict[str, str]], timeout: float = 20.0) -> int:
+        """Append several notes in one FTP session, preflighting them together."""
+        payloads = [self._encode_record(record) for record in records]
+        if not payloads:
+            return 0
+        client = self._connect(timeout=timeout)
         try:
-            self._append_payloads(client, [payload])
+            self._append_payloads(client, payloads)
         finally:
             try:
                 client.quit()
             except ftplib.all_errors:
                 client.close()
+        return len(payloads)
 
     def sync(self) -> tuple[int, int]:
         """Merge capped FTP shards with the bounded local cache and upload local-only notes."""

@@ -42,6 +42,8 @@ class RenderMathTests(unittest.TestCase):
         self.assertIn("updateQueueStatus(item.steer ?", page_source)
         self.assertIn("enqueuePrompt(true)", page_source)
         self.assertIn("cannot change text already being generated", page_source)
+        self.assertIn("const responseText = await res.text();", page_source)
+        self.assertIn("Server returned a non-JSON response", page_source)
 
     def test_help_lists_only_supported_render_chat_commands(self) -> None:
         response = peakebot._handle_help_request("What are your commands?")

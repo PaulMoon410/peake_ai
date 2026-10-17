@@ -255,16 +255,25 @@ def index() -> Response:
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({prompt: item.prompt, history: conversationHistory.slice(-12)})
           });
-          const data = await res.json();
-          if (!res.ok) {
-            addLine('e', 'Error: ' + (data.error || 'Request failed'));
-          } else {
-            addLine('b', 'Harold: ' + data.response);
-            conversationHistory.push(
-              {role: 'user', content: item.prompt},
-              {role: 'assistant', content: data.response}
-            );
-            if (conversationHistory.length > 12) conversationHistory.splice(0, conversationHistory.length - 12);
+          const responseText = await res.text();
+          let data = null;
+          try {
+            data = JSON.parse(responseText);
+          } catch (_parseError) {
+            const detail = responseText.replace(/\s+/g, ' ').trim().slice(0, 240);
+            addLine('e', `Server returned a non-JSON response (HTTP ${res.status}). ${detail || 'Please retry shortly.'}`);
+          }
+          if (data !== null) {
+            if (!res.ok) {
+              addLine('e', 'Error: ' + (data.error || 'Request failed'));
+            } else {
+              addLine('b', 'Harold: ' + data.response);
+              conversationHistory.push(
+                {role: 'user', content: item.prompt},
+                {role: 'assistant', content: data.response}
+              );
+              if (conversationHistory.length > 12) conversationHistory.splice(0, conversationHistory.length - 12);
+            }
           }
         } catch (err) {
           addLine('e', 'Network error: ' + err.message);

@@ -151,6 +151,21 @@ class MemoryStoreTests(unittest.TestCase):
 
             self.assertEqual(b"", ftp.data)
 
+    def test_upload_many_uses_one_ftp_session_for_all_records(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            first = store.add("First batch note")
+            second = store.add("Second batch note")
+            assert first is not None and second is not None
+            ftp = FakeFtp()
+
+            with patch.object(store, "_connect", return_value=ftp) as connect:
+                uploaded = store.upload_many([first, second])
+
+            self.assertEqual(2, uploaded)
+            connect.assert_called_once_with(timeout=20.0)
+            self.assertEqual(2, len(ftp.data.splitlines()))
+
     def test_sync_preflights_all_uploads_before_writing(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = MemoryStore(Path(folder) / "memory.jsonl")
