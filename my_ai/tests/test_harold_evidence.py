@@ -21,23 +21,46 @@ class FakeEvidenceFetcher:
 
 
 class HaroldEvidenceTests(unittest.TestCase):
-    def test_extracts_compares_and_saves_each_source_url(self) -> None:
+    def test_extracts_compares_all_sources_and_saves_each_source_url(self) -> None:
         passage = (
             "Sleep supports attention, learning, and memory, and regular sleep helps people "
             "recover from demanding daily activities."
         )
         html = f"<html><title>Sleep and memory</title><main><p>{passage}</p></main></html>"
-        urls = ["https://one.example.com/sleep", "https://two.example.net/research"]
+        urls = [
+            "https://one.example.com/sleep",
+            "https://two.example.net/research",
+            "https://three.example.org/guide",
+        ]
         with tempfile.TemporaryDirectory() as folder:
             store = MemoryStore(Path(folder) / "memory.jsonl")
             researcher = SourceResearcher(store, FakeEvidenceFetcher({url: html for url in urls}))  # type: ignore[arg-type]
 
             report = researcher.learn("sleep memory", urls)
 
-            self.assertEqual(2, report.notes_added)
-            self.assertEqual(1, len(report.corroborations))
+            self.assertEqual(3, report.notes_added)
+            self.assertEqual(3, len(report.corroborations))
             self.assertEqual({*urls}, {record["s"] for record in store.records})
             self.assertTrue(all(record["c"].startswith("Harold/Research/") for record in store.records))
+
+    def test_accepts_four_sources_but_rejects_more_than_four(self) -> None:
+        passage = "Sleep supports attention, learning, and memory during demanding everyday activities."
+        html = f"<main><p>{passage}</p></main>"
+        urls = [
+            "https://one.example.com/sleep",
+            "https://two.example.net/sleep",
+            "https://three.example.org/sleep",
+            "https://four.example.edu/sleep",
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            researcher = SourceResearcher(store, FakeEvidenceFetcher({url: html for url in urls}))  # type: ignore[arg-type]
+
+            report = researcher.learn("sleep", urls)
+
+            self.assertEqual(4, len(report.pages))
+            with self.assertRaisesRegex(ValueError, "two to 4"):
+                researcher.learn("sleep", urls + ["https://five.example.info/sleep"])
 
     def test_refuses_two_sources_from_the_same_registrable_domain(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

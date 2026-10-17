@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 import urllib.parse
 
-from harold import urlguard
-from harold.net import FetchError, PoliteFetcher
+from . import urlguard
+from .net import FetchError, PoliteFetcher
 
 
 DDG_LITE_ENDPOINT = "https://lite.duckduckgo.com/lite/"

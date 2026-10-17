@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 
-from harold.lexicon import fit_note
+from .lexicon import fit_note
 
 
 MAX_TAIL_BYTES = 512 * 1024

@@ -187,7 +187,7 @@ def index() -> Response:
       <textarea id=\"prompt\" placeholder=\"Type your message...\"></textarea>
       <button id=\"send\">Send</button>
     </div>
-    <div class=\"hint\">Try “learn about sleep from https://site-one.org/article | https://site-two.org/report”, “learn math: 2 + 2”, or “recall math: circles”. Avoid sensitive data.</div>
+    <div class=\"hint\">Try “learn about sleep from https://site-one.org/article | https://site-two.org/report | https://site-three.org/guide”, “learn math: 2 + 2”, or “recall math: circles”. Avoid sensitive data.</div>
   </div>
   <script>
     const log = document.getElementById('log');

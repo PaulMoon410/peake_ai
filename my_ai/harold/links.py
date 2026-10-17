@@ -13,7 +13,7 @@ from html.parser import HTMLParser
 import re
 import urllib.parse
 
-from harold.readability import SKIP_TAGS
+from .readability import SKIP_TAGS
 
 
 BINARY_EXTENSIONS = (

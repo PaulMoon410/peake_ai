@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from harold.lexicon import fit_note
+from .lexicon import fit_note
 
 
 SUMMARY_CHAR_LIMIT = 480

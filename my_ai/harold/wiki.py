@@ -12,9 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import urllib.parse
 
-from harold.net import FetchError, PoliteFetcher
-from harold.sources import SearchHit, WebSearchSource
-from harold.topics import CurriculumTopic
+from .net import FetchError, PoliteFetcher
+from .sources import SearchHit, WebSearchSource
+from .topics import CurriculumTopic
 
 
 WIKIPEDIA_ARTICLE_PREFIX = "/wiki/"
@@ -84,7 +84,7 @@ class WikipediaSource:
 
     def related_articles(self, url: str, html: str, limit: int = 2) -> list[str]:
         """Other article URLs linked from an article, for a shallow follow."""
-        from harold.links import extract_links
+        from .links import extract_links
 
         links = extract_links(
             html, url, same_host_only=True, deny_path_fragments=ARTICLE_DENY_FRAGMENTS, limit=60

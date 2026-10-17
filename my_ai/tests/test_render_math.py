@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from my_ai.memory_store import MemoryStore
+import my_ai.harold.agent as harold_agent
 
 _fake_language_model = types.ModuleType("language_model")
 
@@ -56,20 +57,33 @@ class RenderMathTests(unittest.TestCase):
         learn.assert_called_once_with("https://example.org/article")
         self.assertIsNone(peakebot._handle_website_learning_request("Tell me about https://example.org"))
 
-    def test_two_source_research_command_passes_topic_and_both_urls(self) -> None:
-        urls = ["https://one.example.org/article", "https://two.example.net/report"]
+    def test_multi_source_research_command_passes_topic_and_all_urls(self) -> None:
+        urls = [
+            "https://one.example.org/article",
+            "https://two.example.net/report",
+            "https://three.example.edu/guide",
+            "https://four.example.info/overview",
+        ]
         with patch.object(peakebot, "_learn_from_sources", return_value="compared") as research:
             response = peakebot._handle_website_learning_request(
-                f"learn about sleep and memory from {urls[0]} | {urls[1]}"
+                f"learn about sleep and memory from {' | '.join(urls)}"
             )
 
         self.assertEqual("compared", response)
         research.assert_called_once_with("sleep and memory", urls)
+        too_few = peakebot._handle_website_learning_request(
+            "learn about sleep from https://one.example.org/article"
+        )
+        too_many = peakebot._handle_website_learning_request(
+            "learn about sleep from " + " | ".join(urls + ["https://five.example.org/article"])
+        )
+        self.assertIn("2–4 article URLs", too_few or "")
+        self.assertIn("2–4 article URLs", too_many or "")
 
-    def test_two_source_research_reports_citations_and_safe_fetch_policy(self) -> None:
+    def test_multi_source_research_reports_citations_and_safe_fetch_policy(self) -> None:
         from types import SimpleNamespace
 
-        urls = ["https://one.example.org/article", "https://two.example.net/report"]
+        urls = ["https://one.example.org/article", "https://two.example.net/report", "https://three.example.edu/guide"]
         pages = [
             SimpleNamespace(title="Article one", url=urls[0], notes_added=2),
             SimpleNamespace(title="Report two", url=urls[1], notes_added=1),
@@ -87,8 +101,9 @@ class RenderMathTests(unittest.TestCase):
         self.assertIn(urls[1], answer)
         self.assertIn("unverified", answer)
         fetcher = researcher_class.call_args.args[1]
-        self.assertEqual(5.0, fetcher.policy.timeout_seconds)
+        self.assertEqual(2.0, fetcher.policy.timeout_seconds)
         self.assertEqual(256 * 1024, fetcher.policy.max_bytes)
+        self.assertEqual(1, fetcher.policy.max_redirects)
         self.assertTrue(fetcher.policy.respect_robots)
 
     def test_website_learning_uses_bounded_polite_reader_and_reports_source(self) -> None:
@@ -104,7 +119,7 @@ class RenderMathTests(unittest.TestCase):
             report = SimpleNamespace(pages=[page], notes_added=2, notes_uploaded=2)
             with (
                 patch.object(peakebot, "_get_mcf_memory_store", return_value=store),
-                patch("my_ai.harold.agent.HaroldAgent") as agent_class,
+                patch.object(harold_agent, "HaroldAgent") as agent_class,
             ):
                 agent_class.return_value.learn_url.return_value = report
                 answer = peakebot._learn_from_website_url("https://example.org/article")

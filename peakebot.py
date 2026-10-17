@@ -1823,13 +1823,13 @@ _LEARN_WEBSITE_RE = re.compile(
     re.IGNORECASE,
 )
 _SOURCE_RESEARCH_RE = re.compile(
-    r"^(?:please\s+)?(?:learn about|research and learn|compare sources on)\s+(.+?)\s+from\s+(https?://\S+)\s*\|\s*(https?://\S+)$",
+    r"^(?:please\s+)?(?:learn about|research and learn|compare sources on)\s+(.+?)\s+from\s+(.+)$",
     re.IGNORECASE,
 )
 _HELP_RESPONSE = """Here are the commands I understand in this chat:
 
 • learn from <https://public-page-url> — read one public page, extract concise observations about human experience, and save them to memory.
-• learn about <topic> from <URL1> | <URL2> — save relevant source excerpts and compare for matching passages across two sites.
+• learn about <topic> from <URL1> | <URL2> | ... — save excerpts from 2–4 sites and compare matching passages.
 • learn math: <fact or equation> — save a math note; simple arithmetic is checked, other claims stay unverified.
 • calculate <expression> — calculate simple arithmetic, for example: calculate 144 divided by 12.
 • what is <expression>? — another way to ask for a simple arithmetic calculation.
@@ -1922,11 +1922,13 @@ def _handle_help_request(prompt: str) -> str | None:
 
 
 def _handle_website_learning_request(prompt: str) -> str | None:
-    """Route explicit single-page reading or two-source research requests."""
+    """Route explicit single-page reading or multi-source research requests."""
     research_match = _SOURCE_RESEARCH_RE.fullmatch(prompt.strip())
     if research_match:
         topic = research_match.group(1).strip()
-        urls = [research_match.group(2).rstrip(".,;!"), research_match.group(3).rstrip(".,;!")]
+        urls = [part.strip().rstrip(".,;!") for part in research_match.group(2).split("|")]
+        if not 2 <= len(urls) <= 4 or any(not url for url in urls):
+            return "Provide 2–4 article URLs separated by |, each from a different site."
         return _learn_from_sources(topic, urls)
 
     match = _LEARN_WEBSITE_RE.fullmatch(prompt.strip())
@@ -1937,24 +1939,24 @@ def _handle_website_learning_request(prompt: str) -> str | None:
 
 
 def _learn_from_sources(topic: str, urls: list[str]) -> str:
-    """Read two public pages, save quoted evidence with citations, and compare passages."""
+    """Read up to four public pages, save cited excerpts, and compare passages."""
     try:
         from my_ai.harold.evidence import SourceResearcher
         from my_ai.harold.net import FetchPolicy, PoliteFetcher
 
         store = _get_mcf_memory_store()
         fetcher = PoliteFetcher(policy=FetchPolicy(
-            timeout_seconds=5.0,
+            timeout_seconds=2.0,
             max_bytes=256 * 1024,
-            max_redirects=2,
-            min_delay_seconds=0.5,
+            max_redirects=1,
+            min_delay_seconds=0.25,
             respect_robots=True,
         ))
         report = SourceResearcher(store, fetcher).learn(topic, urls)
     except Exception as exc:
         print(f"⚠️ Harold source research failed: {exc}")
         return (
-            "I couldn't compare those sources. Use two public HTTP(S) article URLs "
+            "I couldn't compare those sources. Use 2–4 public HTTP(S) article URLs "
             "from different sites; private hosts, unsafe destinations, and URLs over 500 characters are refused."
         )
 
@@ -1979,7 +1981,7 @@ def _learn_from_sources(topic: str, urls: list[str]) -> str:
         match_lines = [
             f"- Similar wording (shared terms: {', '.join(match.shared_terms[:8])}): "
             f"{match.first_excerpt}\n  Sources: {match.first_url} | {match.second_url}"
-            for match in report.corroborations[:3]
+            for match in report.corroborations[:6]
         ]
         assessment = (
             "Passages with substantial wording overlap were found across distinct sites. "

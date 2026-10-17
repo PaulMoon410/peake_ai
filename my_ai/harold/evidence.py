@@ -8,6 +8,7 @@ are reported as corroborating evidence, never as proof that a claim is true.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 import re
 
 from .lexicon import is_boilerplate, words
@@ -23,7 +24,7 @@ _STOP_WORDS = frozenset({
     "them", "then", "there", "these", "they", "this", "those", "through", "under",
     "very", "what", "when", "where", "which", "while", "with", "would",
 })
-_MAX_SOURCES = 2
+_MAX_SOURCES = 4
 _MAX_EXCERPTS_PER_SOURCE = 3
 _MIN_EXCERPT_CHARS = 50
 _MAX_EXCERPT_CHARS = 460
@@ -70,19 +71,19 @@ class SourceResearchReport:
 
 
 class SourceResearcher:
-    """Extract source-backed evidence and conservatively compare two pages."""
+    """Extract source-backed evidence and conservatively compare several pages."""
 
     def __init__(self, store: object, fetcher: PoliteFetcher) -> None:
         self.store = store
         self.fetcher = fetcher
 
     def learn(self, topic: str, urls: list[str]) -> SourceResearchReport:
-        """Save short source excerpts and report close matches across two domains."""
+        """Save short source excerpts and report close matches across distinct domains."""
         cleaned_topic = " ".join(topic.split())
         if not cleaned_topic or len(cleaned_topic) > 120:
             raise ValueError("Enter a topic between 1 and 120 characters.")
-        if not 1 <= len(urls) <= _MAX_SOURCES:
-            raise ValueError(f"Provide one or two source URLs (maximum {_MAX_SOURCES}).")
+        if not 2 <= len(urls) <= _MAX_SOURCES:
+            raise ValueError(f"Provide two to {_MAX_SOURCES} source URLs.")
 
         domains: set[str] = set()
         for url in urls:
@@ -158,31 +159,29 @@ class SourceResearcher:
     @staticmethod
     def _compare_pages(pages: list[SourcePage]) -> list[Corroboration]:
         matches: list[Corroboration] = []
-        if len(pages) < 2:
-            return matches
-        first, second = pages[0], pages[1]
-        if not first.url or not second.url:
-            return matches
-        if registrable_host(first.url) == registrable_host(second.url):
-            return matches
-        for first_excerpt in first.excerpts:
-            first_terms = {
-                token for token in words(first_excerpt)
-                if len(token) > 3 and token not in _STOP_WORDS
-            }
-            for second_excerpt in second.excerpts:
-                second_terms = {
-                    token for token in words(second_excerpt)
+        for first, second in combinations(pages, 2):
+            if not first.url or not second.url:
+                continue
+            if registrable_host(first.url) == registrable_host(second.url):
+                continue
+            for first_excerpt in first.excerpts:
+                first_terms = {
+                    token for token in words(first_excerpt)
                     if len(token) > 3 and token not in _STOP_WORDS
                 }
-                shared = first_terms & second_terms
-                union = first_terms | second_terms
-                if len(shared) >= 4 and len(shared) / max(1, len(union)) >= 0.6:
-                    matches.append(Corroboration(
-                        first_excerpt=first_excerpt,
-                        first_url=first.url,
-                        second_excerpt=second_excerpt,
-                        second_url=second.url,
-                        shared_terms=tuple(sorted(shared)),
-                    ))
+                for second_excerpt in second.excerpts:
+                    second_terms = {
+                        token for token in words(second_excerpt)
+                        if len(token) > 3 and token not in _STOP_WORDS
+                    }
+                    shared = first_terms & second_terms
+                    union = first_terms | second_terms
+                    if len(shared) >= 4 and len(shared) / max(1, len(union)) >= 0.6:
+                        matches.append(Corroboration(
+                            first_excerpt=first_excerpt,
+                            first_url=first.url,
+                            second_excerpt=second_excerpt,
+                            second_url=second.url,
+                            shared_terms=tuple(sorted(shared)),
+                        ))
         return matches
