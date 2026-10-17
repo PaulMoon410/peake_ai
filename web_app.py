@@ -139,7 +139,7 @@ def index() -> Response:
     .e { color: var(--error); }
     .input {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1fr auto auto;
       gap: 10px;
       border-top: 1px solid #1f2937;
       padding: 12px;
@@ -166,12 +166,14 @@ def index() -> Response:
       padding: 0 16px;
       cursor: pointer;
     }
+    #steer { background: #f59e0b; color: #451a03; }
     button:disabled { opacity: .6; cursor: not-allowed; }
     .hint {
       color: var(--muted);
       font-size: 12px;
       padding: 0 12px 12px;
     }
+    #queue-status { color: var(--muted); font-size: 12px; padding: 0 12px 10px; }
   </style>
 </head>
 <body>
@@ -186,14 +188,22 @@ def index() -> Response:
     <div class=\"input\">
       <textarea id=\"prompt\" placeholder=\"Type your message...\"></textarea>
       <button id=\"send\">Send</button>
+      <button id=\"steer\" title=\"Prioritize this instruction after the current reply\">Steer next</button>
     </div>
-    <div class=\"hint\">Try “learn about sleep from https://site-one.org/article | https://site-two.org/report | https://site-three.org/guide”, “learn math: 2 + 2”, or “recall math: circles”. Avoid sensitive data.</div>
+    <div id=\"queue-status\" aria-live=\"polite\">Ready.</div>
+    <div class=\"hint\">Messages are sent in order. “Steer next” prioritizes guidance after Harold's current reply; it cannot change text already being generated. Avoid sensitive data.</div>
   </div>
   <script>
     const log = document.getElementById('log');
     const promptEl = document.getElementById('prompt');
     const sendBtn = document.getElementById('send');
+    const steerBtn = document.getElementById('steer');
+    const queueStatus = document.getElementById('queue-status');
     const conversationHistory = [];
+    const messageQueue = [];
+    const MAX_QUEUED_MESSAGES = 20;
+    let processingQueue = false;
+    let activeStatus = '';
 
     function addLine(cls, text) {
       const line = document.createElement('div');
@@ -203,42 +213,76 @@ def index() -> Response:
       log.scrollTop = log.scrollHeight;
     }
 
-    async function sendPrompt() {
-      const prompt = promptEl.value.trim();
-      if (!prompt) return;
-      addLine('u', 'You: ' + prompt);
-      promptEl.value = '';
-      sendBtn.disabled = true;
-      try {
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({prompt, history: conversationHistory.slice(-12)})
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          addLine('e', 'Error: ' + (data.error || 'Request failed'));
-        } else {
-          addLine('b', 'Harold: ' + data.response);
-          conversationHistory.push(
-            {role: 'user', content: prompt},
-            {role: 'assistant', content: data.response}
-          );
-          if (conversationHistory.length > 12) conversationHistory.splice(0, conversationHistory.length - 12);
-        }
-      } catch (err) {
-        addLine('e', 'Network error: ' + err.message);
-      } finally {
-        sendBtn.disabled = false;
-        promptEl.focus();
+    function updateQueueStatus(activeText = null) {
+      if (activeText !== null) activeStatus = activeText;
+      const pending = messageQueue.length;
+      if (processingQueue) {
+        queueStatus.textContent = activeStatus + (pending ? ` · ${pending} queued` : '');
+      } else {
+        queueStatus.textContent = pending ? `${pending} queued` : 'Ready.';
       }
     }
 
-    sendBtn.addEventListener('click', sendPrompt);
+    function enqueuePrompt(steer = false) {
+      const prompt = promptEl.value.trim();
+      if (!prompt) return;
+      if (messageQueue.length >= MAX_QUEUED_MESSAGES) {
+        addLine('e', `Queue is full (maximum ${MAX_QUEUED_MESSAGES} waiting messages).`);
+        return;
+      }
+      promptEl.value = '';
+      const item = {prompt, steer};
+      if (steer) {
+        messageQueue.unshift(item);
+        addLine('u', 'You (steering next): ' + prompt);
+      } else {
+        messageQueue.push(item);
+        addLine('u', 'You: ' + prompt);
+      }
+      updateQueueStatus();
+      void processQueue();
+    }
+
+    async function processQueue() {
+      if (processingQueue) return;
+      processingQueue = true;
+      while (messageQueue.length) {
+        const item = messageQueue.shift();
+        updateQueueStatus(item.steer ? 'Applying steering instruction…' : 'Harold is responding…');
+        try {
+          const res = await fetch('/api/chat', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({prompt: item.prompt, history: conversationHistory.slice(-12)})
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            addLine('e', 'Error: ' + (data.error || 'Request failed'));
+          } else {
+            addLine('b', 'Harold: ' + data.response);
+            conversationHistory.push(
+              {role: 'user', content: item.prompt},
+              {role: 'assistant', content: data.response}
+            );
+            if (conversationHistory.length > 12) conversationHistory.splice(0, conversationHistory.length - 12);
+          }
+        } catch (err) {
+          addLine('e', 'Network error: ' + err.message);
+        }
+        updateQueueStatus();
+      }
+      processingQueue = false;
+      activeStatus = '';
+      updateQueueStatus();
+      promptEl.focus();
+    }
+
+    sendBtn.addEventListener('click', () => enqueuePrompt(false));
+    steerBtn.addEventListener('click', () => enqueuePrompt(true));
     promptEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        sendPrompt();
+        enqueuePrompt(false);
       }
     });
 

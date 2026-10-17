@@ -33,6 +33,15 @@ class RenderMathTests(unittest.TestCase):
         page_source = (ROOT / "web_app.py").read_text(encoding="utf-8")
 
         self.assertIn("const conversationHistory = [];", page_source)
+        self.assertIn("const messageQueue = [];", page_source)
+        self.assertIn("const MAX_QUEUED_MESSAGES = 20;", page_source)
+        self.assertIn("messageQueue.push(item);", page_source)
+        self.assertIn("messageQueue.unshift(item);", page_source)
+        self.assertIn("Steer next", page_source)
+        self.assertIn("MAX_QUEUED_MESSAGES = 20", page_source)
+        self.assertIn("updateQueueStatus(item.steer ?", page_source)
+        self.assertIn("enqueuePrompt(true)", page_source)
+        self.assertIn("cannot change text already being generated", page_source)
 
     def test_help_lists_only_supported_render_chat_commands(self) -> None:
         response = peakebot._handle_help_request("What are your commands?")
