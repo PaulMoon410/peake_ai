@@ -396,19 +396,20 @@ class MemoryStore:
     @staticmethod
     def _deduplicate(records: list[dict[str, str]]) -> list[dict[str, str]]:
         by_id: dict[str, dict[str, str]] = {}
-        seen_notes: set[str] = set()
+        seen_notes: set[tuple[str, str]] = set()
         result: list[dict[str, str]] = []
         for record in records:
             note = record["n"]
-            if record["i"] in by_id or note.casefold() in seen_notes:
+            source = record.get("s", "")
+            note_key = (note.casefold(), source)
+            if record["i"] in by_id or note_key in seen_notes:
                 continue
             category = record.get("c", "Knowledge")
-            source = record.get("s", "")
             clean = {"i": record["i"], "d": record.get("d", ""), "c": category,
                      "k": record.get("k", MemoryStore._keywords(note, category)), "n": note,
                      "s": source, "v": MemoryStore._source_status(source)}
             by_id[clean["i"]] = clean
-            seen_notes.add(note.casefold())
+            seen_notes.add(note_key)
             result.append(clean)
         return result
 
@@ -499,8 +500,6 @@ class MemoryStore:
             raise ValueError("Memory note cannot be empty.")
         if len(cleaned) > _MAX_NOTE_CHARS:
             raise ValueError(f"Keep memory notes to {_MAX_NOTE_CHARS} characters or fewer.")
-        if any(item["n"].casefold() == cleaned.casefold() for item in self.records):
-            return None
 
         # Parse memory language syntax
         lang_cat, _, _, lang_source, clean_note = MemoryLanguage.parse_note(cleaned)
@@ -522,6 +521,13 @@ class MemoryStore:
             if (len(final_source) > 500 or parsed_source.scheme not in {"http", "https"}
                     or not parsed_source.hostname):
                 raise ValueError("A source must be a valid http:// or https:// URL under 500 characters.")
+
+        if any(
+            item["n"].casefold() == final_note.casefold()
+            and item.get("s", "") == final_source
+            for item in self.records
+        ):
+            return None
 
         record = {
             "i": uuid.uuid4().hex[:12], "d": date.today().isoformat(), "c": final_cat,

@@ -1822,9 +1822,14 @@ _LEARN_WEBSITE_RE = re.compile(
     r"^(?:please\s+)?(?:learn from|read and learn from|study)\s+(https?://\S+)$",
     re.IGNORECASE,
 )
+_SOURCE_RESEARCH_RE = re.compile(
+    r"^(?:please\s+)?(?:learn about|research and learn|compare sources on)\s+(.+?)\s+from\s+(https?://\S+)\s*\|\s*(https?://\S+)$",
+    re.IGNORECASE,
+)
 _HELP_RESPONSE = """Here are the commands I understand in this chat:
 
 • learn from <https://public-page-url> — read one public page, extract concise observations about human experience, and save them to memory.
+• learn about <topic> from <URL1> | <URL2> — save relevant source excerpts and compare for matching passages across two sites.
 • learn math: <fact or equation> — save a math note; simple arithmetic is checked, other claims stay unverified.
 • calculate <expression> — calculate simple arithmetic, for example: calculate 144 divided by 12.
 • what is <expression>? — another way to ask for a simple arithmetic calculation.
@@ -1917,12 +1922,78 @@ def _handle_help_request(prompt: str) -> str | None:
 
 
 def _handle_website_learning_request(prompt: str) -> str | None:
-    """Route an explicit one-page public website learning request."""
+    """Route explicit single-page reading or two-source research requests."""
+    research_match = _SOURCE_RESEARCH_RE.fullmatch(prompt.strip())
+    if research_match:
+        topic = research_match.group(1).strip()
+        urls = [research_match.group(2).rstrip(".,;!"), research_match.group(3).rstrip(".,;!")]
+        return _learn_from_sources(topic, urls)
+
     match = _LEARN_WEBSITE_RE.fullmatch(prompt.strip())
     if not match:
         return None
     url = match.group(1).rstrip(".,;!")
     return _learn_from_website_url(url)
+
+
+def _learn_from_sources(topic: str, urls: list[str]) -> str:
+    """Read two public pages, save quoted evidence with citations, and compare passages."""
+    try:
+        from my_ai.harold.evidence import SourceResearcher
+        from my_ai.harold.net import FetchPolicy, PoliteFetcher
+
+        store = _get_mcf_memory_store()
+        fetcher = PoliteFetcher(policy=FetchPolicy(
+            timeout_seconds=5.0,
+            max_bytes=256 * 1024,
+            max_redirects=2,
+            min_delay_seconds=0.5,
+            respect_robots=True,
+        ))
+        report = SourceResearcher(store, fetcher).learn(topic, urls)
+    except Exception as exc:
+        print(f"⚠️ Harold source research failed: {exc}")
+        return (
+            "I couldn't compare those sources. Use two public HTTP(S) article URLs "
+            "from different sites; private hosts, unsafe destinations, and URLs over 500 characters are refused."
+        )
+
+    if not report.notes_added:
+        return (
+            f"I couldn't extract passages relevant to {report.topic!r}. "
+            "The pages may be blocked, too short, or not contain readable text about that topic."
+        )
+
+    page_lines = [
+        f"- {page.title or page.url}: saved {page.notes_added} excerpt(s); source {page.url}"
+        for page in report.pages if page.notes_added
+    ]
+    if report.notes_uploaded:
+        storage = f"Uploaded {report.notes_uploaded} excerpt(s) to shared FTP memory."
+    elif getattr(store, "ftp_configured", False):
+        storage = "Excerpts are in the local cache; some or all FTP uploads did not succeed."
+    else:
+        storage = "Excerpts are in this instance's local cache only; FTP is not configured."
+
+    if report.corroborations:
+        match_lines = [
+            f"- Similar wording (shared terms: {', '.join(match.shared_terms[:8])}): "
+            f"{match.first_excerpt}\n  Sources: {match.first_url} | {match.second_url}"
+            for match in report.corroborations[:3]
+        ]
+        assessment = (
+            "Passages with substantial wording overlap were found across distinct sites. "
+            "This is a corroboration signal, not proof of truth or source independence.\n"
+            + "\n".join(match_lines)
+        )
+    else:
+        assessment = (
+            "No sufficiently similar passages were found across both pages. "
+            "Saved excerpts remain source-linked and unverified."
+        )
+    return (
+        f"Research on {report.topic!r}:\n" + "\n".join(page_lines) + "\n" + storage + "\n" + assessment
+    )
 
 
 def _learn_from_website_url(url: str) -> str:

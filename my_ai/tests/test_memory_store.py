@@ -88,6 +88,27 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual("", store.relevant("What is the weather today?"))
             self.assertEqual("user_reported_unverified", first["v"])
 
+    def test_same_note_from_distinct_sources_keeps_both_citations(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "memory.jsonl"
+            store = MemoryStore(path)
+            note = "People describe sleep as important for daily wellbeing and recovery."
+
+            first = store.add(note, category="Harold/Observations/External", source="https://one.example/article")
+            second = store.add(note, category="Harold/Observations/External", source="https://two.example/report")
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertEqual(2, len(store.records))
+            self.assertEqual(
+                {"https://one.example/article", "https://two.example/report"},
+                {record["s"] for record in store.records},
+            )
+            self.assertIsNone(store.add(note, category="Harold/Observations/External", source="https://one.example/article"))
+
+            reloaded = MemoryStore(path)
+            self.assertEqual(2, len(reloaded.records))
+
     def test_legacy_markdown_is_imported(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
