@@ -33,6 +33,18 @@ class RenderMathTests(unittest.TestCase):
 
         self.assertIn("const conversationHistory = [];", page_source)
 
+    def test_help_lists_only_supported_render_chat_commands(self) -> None:
+        response = peakebot._handle_help_request("What are your commands?")
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertIn("learn math:", response)
+        self.assertIn("recall math:", response)
+        self.assertIn("remember that", response)
+        self.assertIn("search web:", response)
+        self.assertIn("does not support the local CLI commands", response)
+        self.assertIsNone(peakebot._handle_help_request("What commands do Hive bots use?"))
+
     def test_chat_calculates_and_saves_math_fact(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = self.make_store(folder)

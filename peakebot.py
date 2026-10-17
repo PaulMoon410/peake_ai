@@ -1813,6 +1813,24 @@ _EXPLICIT_MEMORY_RE = re.compile(
     r"^(?:please\s+)?(?:remember(?:\s+that)?|keep\s+in\s+mind(?:\s+that)?|note(?:\s+that)?)\s*[:,-]?\s*(.+)$",
     re.IGNORECASE,
 )
+_HELP_REQUEST_RE = re.compile(
+    r"^(?:/?help|/?commands?|what\s+(?:are\s+)?(?:(?:the|your)\s+)?(?:commands?|things\s+you\s+can\s+do)|"
+    r"how\s+do\s+i\s+use\s+you)[.!?\s]*$",
+    re.IGNORECASE,
+)
+_HELP_RESPONSE = """Here are the commands I understand in this chat:
+
+• learn math: <fact or equation> — save a math note; simple arithmetic is checked, other claims stay unverified.
+• calculate <expression> — calculate simple arithmetic, for example: calculate 144 divided by 12.
+• what is <expression>? — another way to ask for a simple arithmetic calculation.
+• recall math: <topic> — search saved math notes, including the shared archive when FTP is available.
+• remember that <note> — save a useful general memory (not passwords, keys, or tokens).
+• search web: <question> — research a question on the web.
+• help or commands — show this list.
+
+For a longer math note, try: learn math: The area of a circle is pi times the radius squared; circumference is 2 times pi times the radius. These are stored as unverified notes unless I can check them as basic arithmetic.
+
+You can also chat normally. This web chat does not support the local CLI commands such as /bot, /site, or /sync."""
 _MATH_LEARN_RE = re.compile(
     r"^(?:please\s+)?(?:learn(?:\s+(?:this|the))?\s+(?:math(?:\s+(?:fact|equation|formula))?|equation|formula)|"
     r"remember\s+(?:this|the)\s+(?:math(?:\s+(?:fact|equation|formula))?|equation|formula))"
@@ -1883,6 +1901,13 @@ def _handle_math_request(prompt: str) -> str | None:
 
     if expression and _is_simple_math_expression(expression):
         return _learn_math_statement(expression)
+    return None
+
+
+def _handle_help_request(prompt: str) -> str | None:
+    """Return the supported command list for the Render web chat."""
+    if _HELP_REQUEST_RE.fullmatch(prompt.strip()):
+        return _HELP_RESPONSE
     return None
 
 
@@ -2012,6 +2037,11 @@ def generate_response(prompt, conversation_history=None):
     history = normalize_history(conversation_history)
     if not raw_prompt:
         return "Please type a message, and I will help."
+
+    help_response = _handle_help_request(raw_prompt)
+    if help_response is not None:
+        remember(raw_prompt, help_response)
+        return help_response
 
     math_response = _handle_math_request(raw_prompt)
     if math_response is not None:
