@@ -10,11 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import urllib.parse
 
-from harold import urlguard
-from harold.net import PoliteFetcher
-from harold.sources import WebSearchSource
-from harold.topics import CurriculumTopic
-from harold.wiki import WikipediaSource
+from . import urlguard
+from .net import PoliteFetcher
+from .sources import WebSearchSource
+from .topics import CurriculumTopic
+from .wiki import WikipediaSource
 
 
 # Paths that usually mean a tag archive, feed or index rather than an article.

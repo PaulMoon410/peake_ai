@@ -8,9 +8,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from harold.curator import Curator
-from harold.discovery import Candidate, Discovery
-from harold.journal import (
+from .curator import Curator
+from .discovery import Candidate, Discovery
+from .journal import (
     KIND_PAGE,
     KIND_REFLECTION,
     KIND_SESSION,
@@ -18,11 +18,11 @@ from harold.journal import (
     Journal,
     JournalEntry,
 )
-from harold.net import FetchError, PoliteFetcher
-from harold.readability import html_to_text, is_probably_article
-from harold.reflection import NoteView, Reflection, build_reflection
-from harold.sources import WebSearchSource
-from harold.topics import (
+from .net import FetchError, PoliteFetcher
+from .readability import html_to_text, is_probably_article
+from .reflection import NoteView, Reflection, build_reflection
+from .sources import WebSearchSource
+from .topics import (
     OBSERVATION_ROOT,
     TOPIC_SEEDS,
     UNDERSTANDING_ROOT,
@@ -30,8 +30,8 @@ from harold.topics import (
     find_topic,
     next_topics,
 )
-from harold.urlguard import UrlRejected
-from harold.wiki import WikipediaSource
+from .urlguard import UrlRejected
+from .wiki import WikipediaSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,8 +234,8 @@ class HaroldAgent:
         """Learn from one specific page the user pointed at."""
         topic = find_topic(topic_name) if topic_name else None
         if topic is None:
-            from harold.lexicon import words
-            from harold.links import title_from_url
+            from .lexicon import words
+            from .links import title_from_url
 
             name = topic_name.strip() or title_from_url(url)
             keywords = tuple(dict.fromkeys(word for word in words(name) if len(word) > 2))[:5]

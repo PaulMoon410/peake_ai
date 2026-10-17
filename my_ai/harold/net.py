@@ -14,8 +14,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from harold import robots as robots_module
-from harold import urlguard
+from . import robots as robots_module
+from . import urlguard
 
 
 DEFAULT_USER_AGENT = (

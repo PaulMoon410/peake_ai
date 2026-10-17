@@ -1818,8 +1818,13 @@ _HELP_REQUEST_RE = re.compile(
     r"how\s+do\s+i\s+use\s+you)[.!?\s]*$",
     re.IGNORECASE,
 )
+_LEARN_WEBSITE_RE = re.compile(
+    r"^(?:please\s+)?(?:learn from|read and learn from|study)\s+(https?://\S+)$",
+    re.IGNORECASE,
+)
 _HELP_RESPONSE = """Here are the commands I understand in this chat:
 
+• learn from <https://public-page-url> — read one public page, extract concise observations about human experience, and save them to memory.
 • learn math: <fact or equation> — save a math note; simple arithmetic is checked, other claims stay unverified.
 • calculate <expression> — calculate simple arithmetic, for example: calculate 144 divided by 12.
 • what is <expression>? — another way to ask for a simple arithmetic calculation.
@@ -1909,6 +1914,73 @@ def _handle_help_request(prompt: str) -> str | None:
     if _HELP_REQUEST_RE.fullmatch(prompt.strip()):
         return _HELP_RESPONSE
     return None
+
+
+def _handle_website_learning_request(prompt: str) -> str | None:
+    """Route an explicit one-page public website learning request."""
+    match = _LEARN_WEBSITE_RE.fullmatch(prompt.strip())
+    if not match:
+        return None
+    url = match.group(1).rstrip(".,;!")
+    return _learn_from_website_url(url)
+
+
+def _learn_from_website_url(url: str) -> str:
+    """Read one polite, bounded public page and save Harold's extracted observations."""
+    try:
+        from my_ai.harold.agent import HaroldAgent, HaroldConfig
+        from my_ai.harold.net import FetchPolicy, PoliteFetcher
+
+        store = _get_mcf_memory_store()
+        config = HaroldConfig(
+            pages_per_session=1,
+            pages_per_host=1,
+            candidates_per_topic=1,
+            links_per_page=0,
+            use_model=False,
+            journal_path=Path(tempfile.gettempdir()) / "peakebot-harold-journal.jsonl",
+        )
+        fetcher = PoliteFetcher(policy=FetchPolicy(
+            timeout_seconds=8.0,
+            max_bytes=256 * 1024,
+            max_redirects=2,
+            min_delay_seconds=0.5,
+            respect_robots=True,
+        ))
+        agent = HaroldAgent(store, config=config, fetcher=fetcher)
+        report = agent.learn_url(url)
+    except Exception as exc:
+        print(f"⚠️ Harold website learning failed: {exc}")
+        return (
+            "I couldn't read that page. I only fetch public HTTP(S) text pages, "
+            "respect robots.txt, and reject private or unsafe hosts."
+        )
+
+    if not report.pages:
+        return (
+            "I couldn't accept that URL. Please use a public HTTP(S) article URL; "
+            "private hosts, login-only sites, and unsafe destinations are refused."
+        )
+
+    page = report.pages[0]
+    if report.notes_added == 0:
+        return (
+            f"I read {page.title or url}, but couldn't extract suitable observations "
+            f"({page.detail}). The reader currently keeps concise observations about human experience."
+        )
+
+    if report.notes_uploaded:
+        storage = f"Saved {report.notes_uploaded} note(s) to shared FTP memory."
+    elif getattr(store, "ftp_configured", False):
+        storage = f"Saved {report.notes_added} note(s) locally; FTP upload did not succeed."
+    else:
+        storage = f"Saved {report.notes_added} note(s) in this instance's local cache only; FTP is not configured."
+    title = page.title or url
+    return (
+        f"I read {title} and extracted {report.notes_added} concise observation(s) "
+        f"about human experience. Source: {page.url}\n{storage} "
+        "These are source-based notes, not independently verified facts."
+    )
 
 
 def _learn_math_statement(statement: str) -> str:
@@ -2042,6 +2114,11 @@ def generate_response(prompt, conversation_history=None):
     if help_response is not None:
         remember(raw_prompt, help_response)
         return help_response
+
+    website_learning_response = _handle_website_learning_request(raw_prompt)
+    if website_learning_response is not None:
+        remember(raw_prompt, website_learning_response)
+        return website_learning_response
 
     math_response = _handle_math_request(raw_prompt)
     if math_response is not None:

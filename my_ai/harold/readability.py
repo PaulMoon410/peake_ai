@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import re
 from html.parser import HTMLParser
 
-from harold.lexicon import WORD_RE, experience_score, is_experiential, note_key
+from .lexicon import WORD_RE, experience_score, is_experiential, note_key
 
 
 SKIP_TAGS = frozenset({

@@ -11,9 +11,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from harold.lexicon import fit_note, is_experiential, note_key
-from harold.readability import PageText, salient_sentences
-from harold.topics import CurriculumTopic
+from .lexicon import fit_note, is_experiential, note_key
+from .readability import PageText, salient_sentences
+from .topics import CurriculumTopic
 
 
 NOTE_CHAR_LIMIT = 460          # below the memory store's own 500-char ceiling

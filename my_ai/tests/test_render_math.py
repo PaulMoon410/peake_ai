@@ -45,6 +45,45 @@ class RenderMathTests(unittest.TestCase):
         self.assertIn("does not support the local CLI commands", response)
         self.assertIsNone(peakebot._handle_help_request("What commands do Hive bots use?"))
 
+    def test_explicit_website_learning_routes_to_reader(self) -> None:
+        with patch.object(peakebot, "_learn_from_website_url", return_value="learned") as learn:
+            response = peakebot._handle_website_learning_request(
+                "learn from https://example.org/article."
+            )
+
+        self.assertEqual("learned", response)
+        learn.assert_called_once_with("https://example.org/article")
+        self.assertIsNone(peakebot._handle_website_learning_request("Tell me about https://example.org"))
+
+    def test_website_learning_uses_bounded_polite_reader_and_reports_source(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as folder:
+            store = self.make_store(folder)
+            page = SimpleNamespace(
+                title="A public article",
+                url="https://example.org/article",
+                detail="2 observations",
+            )
+            report = SimpleNamespace(pages=[page], notes_added=2, notes_uploaded=2)
+            with (
+                patch.object(peakebot, "_get_mcf_memory_store", return_value=store),
+                patch("my_ai.harold.agent.HaroldAgent") as agent_class,
+            ):
+                agent_class.return_value.learn_url.return_value = report
+                answer = peakebot._learn_from_website_url("https://example.org/article")
+
+            self.assertIn("extracted 2 concise observation(s)", answer)
+            self.assertIn("https://example.org/article", answer)
+            agent_class.return_value.learn_url.assert_called_once_with("https://example.org/article")
+            config = agent_class.call_args.kwargs["config"]
+            fetcher = agent_class.call_args.kwargs["fetcher"]
+            self.assertEqual(1, config.pages_per_session)
+            self.assertEqual(1, config.pages_per_host)
+            self.assertFalse(config.use_model)
+            self.assertEqual(8.0, fetcher.policy.timeout_seconds)
+            self.assertTrue(fetcher.policy.respect_robots)
+
     def test_chat_calculates_and_saves_math_fact(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             store = self.make_store(folder)
