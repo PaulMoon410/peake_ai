@@ -50,6 +50,12 @@ class FakeFtp:
     def delete(self, path: str) -> None:
         self.files.pop(path, None)
 
+    def pwd(self) -> str:
+        return "/archive"
+
+    def nlst(self) -> list[str]:
+        return sorted(self.files)
+
     def quit(self) -> None:
         pass
 
@@ -76,6 +82,38 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual("existing-user", store.ftp_user)
             self.assertEqual("existing-password", store.ftp_password)
             self.assertEqual("archive/pocketai", store.ftp_base_dir)
+
+    def test_verify_ftp_checks_login_directory_and_listing(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            store.ftp_host = "ftp.example.test"
+            store.ftp_user = "test-user"
+            store.ftp_password = "test-password"
+            ftp = FakeFtp(b'{"i":"0123456789ab","n":"test","c":"Knowledge"}\n')
+
+            with patch.object(store, "_connect", return_value=ftp) as connect:
+                ok, detail = store.verify_ftp(timeout=1.5)
+
+            self.assertTrue(ok)
+            self.assertIn("login/list OK", detail)
+            self.assertIn("1 directory entries", detail)
+            self.assertIn("write permission not tested", detail)
+            connect.assert_called_once_with(timeout=1.5)
+
+    def test_verify_ftp_does_not_include_credentials_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = MemoryStore(Path(folder) / "memory.jsonl")
+            store.ftp_host = "ftp.example.test"
+            store.ftp_user = "private-user"
+            store.ftp_password = "private-password"
+
+            with patch.object(store, "_connect", side_effect=RuntimeError("login failed for private-user private-password")):
+                ok, detail = store.verify_ftp()
+
+            self.assertFalse(ok)
+            self.assertIn("RuntimeError", detail)
+            self.assertNotIn("private-user", detail)
+            self.assertNotIn("private-password", detail)
 
     def test_add_deduplicates_and_recalls_matching_note(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

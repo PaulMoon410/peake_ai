@@ -1174,6 +1174,34 @@ class MemoryStore:
                 pass
         return client
 
+    def verify_ftp(self, timeout: float = 3.0) -> tuple[bool, str]:
+        """Verify FTP login and directory listing without writing remote data."""
+        if not self.ftp_configured:
+            return False, "not configured"
+        client: ftplib.FTP | None = None
+        try:
+            client = self._connect(timeout=timeout)
+            client.pwd()
+            visible_entries = client.nlst()
+            return True, (
+                f"connected; login/list OK; {len(visible_entries)} directory entries visible; "
+                "write permission not tested"
+            )
+        except Exception as exc:
+            message = str(exc)
+            for secret in (self.ftp_password, self.ftp_user):
+                if secret:
+                    message = message.replace(secret, "[redacted]")
+            if self.ftp_host:
+                message = message.replace(self.ftp_host, "[host]")
+            return False, f"{type(exc).__name__}: {message[:180]}"
+        finally:
+            if client is not None:
+                try:
+                    client.quit()
+                except ftplib.all_errors:
+                    client.close()
+
     @staticmethod
     def _encode_record(record: dict[str, str]) -> bytes:
         payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")

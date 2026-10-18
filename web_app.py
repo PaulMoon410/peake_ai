@@ -8,6 +8,7 @@ from flask import Flask, jsonify, request, Response
 from my_ai.conversation import normalize_history
 
 from peakebot import (
+  _get_mcf_memory_store,
   generate_response,
   add_base_knowledge_entry,
   list_base_knowledge_entries,
@@ -29,9 +30,37 @@ _REQUEST_LOG = defaultdict(deque)
 _ADMIN_RATE_WINDOW_SECONDS = 60
 _ADMIN_RATE_LIMIT_REQUESTS = 40
 _ADMIN_REQUEST_LOG = defaultdict(deque)
+_FTP_STARTUP_CHECK_LOCK = threading.Lock()
+_FTP_STARTUP_CHECK_STARTED = False
 
 ADMIN_PANEL_ENABLED = os.getenv("ADMIN_PANEL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+
+
+def _start_ftp_startup_check() -> None:
+  """Run a non-blocking read-only FTP login/list check on the first request."""
+  global _FTP_STARTUP_CHECK_STARTED
+  with _FTP_STARTUP_CHECK_LOCK:
+    if _FTP_STARTUP_CHECK_STARTED:
+      return
+    _FTP_STARTUP_CHECK_STARTED = True
+
+  def check() -> None:
+    try:
+      store = _get_mcf_memory_store()
+      ok, detail = store.verify_ftp(timeout=3.0)
+      state = "OK" if ok else ("NOT CONFIGURED" if detail == "not configured" else "FAILED")
+      print(f"[startup] MCF3 FTP {state}: {detail}", flush=True)
+    except Exception as exc:
+      print(f"[startup] MCF3 FTP check failed: {type(exc).__name__}", flush=True)
+
+  threading.Thread(target=check, name="ftp-startup-check", daemon=True).start()
+
+
+@app.before_request
+def _kickoff_ftp_startup_check() -> None:
+  # Keep Render startup/health responses fast; this runs once in the background.
+  _start_ftp_startup_check()
 
 
 def _check_rate_limit(client_ip: str) -> bool:
