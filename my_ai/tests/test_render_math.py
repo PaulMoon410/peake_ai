@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import sys
 import tempfile
 import types
@@ -19,13 +20,33 @@ class _FakeLanguageModel:
     def load_model(self, *_args: object) -> bool:
         return True
 
+    def generate_response(self, *args, **kwargs):
+        return "fake model response"
+
 
 _fake_language_model.NeuralLanguageModel = _FakeLanguageModel  # type: ignore[attr-defined]
-with patch.dict(sys.modules, {"language_model": _fake_language_model}):
+_fake_language_model.create_training_data = lambda: ["hello world", "how are you"]  # type: ignore[attr-defined]
+_test_ftp_env = {
+    "FTP_HOST": "<REDACTED_FTP_HOST>",
+    "FTP_USER": "<REDACTED_FTP_USER>",
+    "FTP_PASS": "<REDACTED_FTP_PASS>",
+}
+with patch.dict(sys.modules, {"language_model": _fake_language_model}), patch.dict(os.environ, _test_ftp_env):
     import peakebot
 
 
 class RenderMathTests(unittest.TestCase):
+    def test_model_ftp_guard_rejects_redacted_template_credentials(self) -> None:
+        previous = peakebot.FTP_HOST, peakebot.FTP_USER, peakebot.FTP_PASS
+        try:
+            peakebot.FTP_HOST = "<REDACTED_FTP_HOST>"
+            peakebot.FTP_USER = "<REDACTED_FTP_USER>"
+            peakebot.FTP_PASS = "<REDACTED_FTP_PASS>"
+
+            self.assertFalse(peakebot._ftp_model_credentials_configured())
+        finally:
+            peakebot.FTP_HOST, peakebot.FTP_USER, peakebot.FTP_PASS = previous
+
     def make_store(self, folder: str) -> MemoryStore:
         return MemoryStore(Path(folder) / "memory.jsonl")
 
@@ -48,6 +69,19 @@ class RenderMathTests(unittest.TestCase):
         startup_source = (ROOT / "web_app.py").read_text(encoding="utf-8")
         self.assertIn("SFTP is not used", startup_source)
         self.assertIn("not upload permission", startup_source)
+
+    def test_render_chat_uses_the_bootstrapped_neural_model(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            with (
+                patch.object(peakebot, "_get_mcf_memory_store", return_value=self.make_store(folder)),
+                patch.object(peakebot, "_retrieve_mcf_memory", return_value=""),
+                patch.object(peakebot, "remember"),
+                patch.object(peakebot.model, "generate_response", return_value="The bootstrapped neural model answers this prompt.") as generate,
+            ):
+                answer = peakebot.generate_response("Can you describe clouds?")
+
+        self.assertIn("bootstrapped neural model", answer)
+        generate.assert_called_once()
 
     def test_help_lists_only_supported_render_chat_commands(self) -> None:
         response = peakebot._handle_help_request("What are your commands?")
@@ -156,7 +190,7 @@ class RenderMathTests(unittest.TestCase):
             with (
                 patch.object(peakebot, "_get_mcf_memory_store", return_value=store),
                 patch.object(peakebot, "remember") as remember,
-                patch.object(peakebot, "ask_local_llama") as model,
+                patch.object(peakebot.model, "generate_response") as model,
             ):
                 answer = peakebot.generate_response("calculate 8 times 7")
 

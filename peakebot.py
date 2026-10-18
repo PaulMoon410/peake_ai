@@ -12,8 +12,7 @@ except Exception:
 from ftplib import FTP
 import re
 import requests
-from language_model import NeuralLanguageModel
-from local_llama import ask_local_llama
+from language_model import NeuralLanguageModel, create_training_data
 from my_ai.conversation import (
     build_conversation_prompt,
     build_research_prompt,
@@ -154,6 +153,15 @@ BASIC_INTERACTIONS = [
         "response": "Yes, I learn from our conversations and save them to persistent memory. I can remember interactions, recognize patterns, and improve my responses over time through autonomous research and domain-specific learning.",
     },
     {
+        "name": "command_teaching",
+        "patterns": [
+            "can i teach you new commands",
+            "can you learn new commands",
+            "can i add new commands",
+        ],
+        "response": "I can't learn brand-new slash commands through chat, but you can teach me new things: save facts with 'remember that ...', save math with 'learn math: ...', research topics with 'search web: ...', or have me read a page with 'learn from <URL>'. Those notes persist in memory and shape what I know.",
+    },
+    {
         "name": "casual_acknowledgment",
         "patterns": ["weird", "cool", "interesting", "okay", "ok", "i see", "right", "sure", "got it", "makes sense"],
         "responses": ["I understand.", "Got it.", "Interesting observation.", "Thanks for the feedback.", "I agree."],
@@ -237,28 +245,43 @@ _FTP_PENDING_ENTRIES = []
 
 def _initialize_language_model() -> NeuralLanguageModel:
     model = NeuralLanguageModel()
-    if model.load_model("language_model.pkl"):
+
+    # 1) Try the FTP brain first — durable across Render deploys.
+    if _load_model_from_ftp(model):
         return model
 
-    # Render deploys may not include a pre-trained pickle. Bootstrap a small usable model.
+    # 2) Try the safe, versioned local checkpoint fallback.
+    if model.load_model("language_model.npz"):
+        return model
+
+    # 3) Bootstrap a fresh brain from full training data.
     try:
-        bootstrap_texts = [
+        bootstrap_texts = create_training_data()
+        model.build_vocabulary(bootstrap_texts)
+        model.train_on_text(bootstrap_texts, epochs=5)
+        model.save_model("language_model.npz")
+        saved_to_ftp = _save_model_to_ftp(model)
+        if saved_to_ftp:
+            print("✅ Bootstrapped own model and persisted it to FTP.")
+        elif _ftp_model_credentials_configured():
+            print("⚠️ Bootstrapped own model locally, but FTP persistence failed.")
+        else:
+            print("✅ Bootstrapped own model locally; FTP persistence is not configured.")
+    except Exception as e:
+        print(f"⚠️ Failed to bootstrap model brain: {e}")
+        # Last-resort minimal fallback so the bot can still start.
+        minimal_texts = [
             "Hello, how can I help you today?",
             "I am Harold, a helpful AI assistant.",
             "I can search for information and summarize what I find.",
             "Please ask me a question and I will do my best to help.",
             "I am still learning and may need to verify uncertain information.",
         ]
-        model.build_vocabulary(bootstrap_texts)
-        model.train_on_text(bootstrap_texts, epochs=1)
-        print("⚠️ language_model.pkl not found; bootstrapped a minimal model for startup")
-    except Exception as e:
-        print(f"⚠️ Failed to bootstrap fallback language model: {str(e)}")
+        model.build_vocabulary(minimal_texts)
+        model.train_on_text(minimal_texts, epochs=1)
+        print("⚠️ Safe checkpoint unavailable; bootstrapped a minimal model for startup")
+
     return model
-
-
-# Load the language model
-model = _initialize_language_model()
 
 
 def _tmp_path(filename: str) -> str:
@@ -378,6 +401,92 @@ def _apply_ftp_runtime_config():
 _apply_ftp_runtime_config()
 
 
+def _ftp_model_credentials_configured() -> bool:
+    """Reject empty and documentation placeholder credentials before FTP I/O."""
+    values = (FTP_HOST, FTP_USER, FTP_PASS)
+    return all(value and not re.fullmatch(r"<REDACTED[^>]*>", value) for value in values)
+
+
+def _save_model_to_ftp(model) -> bool:
+    """Save the safe compressed language model checkpoint to FTP.
+
+    Render's disk is ephemeral, so FTP is the durable store for the model
+    weights/vocabulary so the brain survives across deploys.
+    """
+    if not _ftp_model_credentials_configured():
+        return False
+    try:
+        local_path = _tmp_path("language_model_brain.npz")
+        model.save_model(local_path)
+        ftp = FTP(timeout=15)
+        ftp.connect(FTP_HOST, timeout=15)
+        ftp.login(FTP_USER, FTP_PASS)
+        ftp.set_pasv(True)
+        _ensure_ftp_directory(ftp, FTP_BASE_DIR)
+        with open(local_path, "rb") as f:
+            ftp.storbinary("STOR language_model_brain.npz", f)
+        ftp.quit()
+        print(f"🧠 Safe model checkpoint saved to FTP ({os.path.getsize(local_path)} bytes).")
+        return True
+    except Exception as e:
+        message = str(e)
+        for secret in (FTP_PASS, FTP_USER):
+            if secret:
+                message = message.replace(secret, "[redacted]")
+        print(f"⚠️ FTP model save failed: {type(e).__name__}: {message[:180]}")
+        return False
+
+
+def _load_model_from_ftp(model) -> bool:
+    """Load the safe NPZ checkpoint from the FTP brain.
+
+    Returns True if a saved brain was found and loaded, False otherwise.
+    """
+    if not _ftp_model_credentials_configured():
+        return False
+    try:
+        local_path = _tmp_path("language_model_brain.npz")
+        ftp = FTP(timeout=15)
+        ftp.connect(FTP_HOST, timeout=15)
+        ftp.login(FTP_USER, FTP_PASS)
+        ftp.set_pasv(True)
+        _ensure_ftp_directory(ftp, FTP_BASE_DIR)
+        try:
+            ftp.sendcmd("TYPE I")
+            size = ftp.size("language_model_brain.npz")
+        except Exception:
+            size = None
+        if size is not None and size > 64 * 1024 * 1024:
+            raise ValueError("FTP model checkpoint exceeds the 64 MiB download limit.")
+        with open(local_path, "wb") as f:
+            received = 0
+
+            def write_limited(chunk: bytes) -> None:
+                nonlocal received
+                received += len(chunk)
+                if received > 64 * 1024 * 1024:
+                    raise ValueError("FTP model checkpoint exceeds the 64 MiB download limit.")
+                f.write(chunk)
+
+            ftp.retrbinary("RETR language_model_brain.npz", write_limited)
+        ftp.quit()
+        loaded = model.load_model(local_path)
+        if loaded:
+            print(f"🧠 Safe model checkpoint loaded from FTP ({os.path.getsize(local_path)} bytes).")
+        return loaded
+    except Exception as e:
+        message = str(e)
+        for secret in (FTP_PASS, FTP_USER):
+            if secret:
+                message = message.replace(secret, "[redacted]")
+        print(f"⚠️ FTP model load failed (no compatible brain): {type(e).__name__}: {message[:180]}")
+        return False
+
+
+# Load the language model (after FTP brain functions are defined)
+model = _initialize_language_model()
+
+
 def _load_base_knowledge_overrides() -> dict:
     data = _load_json_file(KNOWLEDGE_OVERRIDES_FILE, {})
     if not isinstance(data, dict):
@@ -482,7 +591,11 @@ def _flush_online_learning(force: bool = False):
 
         if learned > 0:
             try:
-                model.save_model("language_model.pkl")
+                model.save_model("language_model.npz")
+                ftp_saved = _save_model_to_ftp(model)
+                if not ftp_saved:
+                    status = "FTP checkpoint upload failed" if _ftp_model_credentials_configured() else "FTP checkpoint not configured"
+                    print(f"⚠️ Online model checkpoint is local-only: {status}.")
                 profile["model_checkpoints"] = int(profile.get("model_checkpoints", 0)) + 1
             except Exception as e:
                 print(f"⚠️ Model checkpoint save failed: {str(e)}")
@@ -1393,8 +1506,12 @@ def process_learning_queue(max_topics: int = 3):
             json.dump(learned_data, f, indent=2)
         
         # Save model after learning
-        model.save_model("language_model.pkl")
-        print(f"\n🎓 Learning session complete! Processed {processed} topics")
+        model.save_model("language_model.npz")
+        ftp_saved = _save_model_to_ftp(model)
+        if ftp_saved:
+            print(f"\n🎓 Learning session complete! Processed {processed} topics; model checkpoint saved to FTP.")
+        else:
+            print(f"\n🎓 Learning session complete! Processed {processed} topics; model checkpoint is local-only.")
         
     except Exception as e:
         print(f"⚠️ Learning session failed: {str(e)}")
@@ -2143,11 +2260,8 @@ def _answer_from_research(prompt, hits, history, memory_context):
         return "I couldn't find useful sources for that yet. Could you narrow the question or tell me which part matters most?"
     user_prompt = build_research_prompt(prompt, hits, history, memory_context)
     try:
-        answer = ask_local_llama(
-            user_prompt,
-            system_prompt=research_answer_system_prompt(),
-            max_tokens=550,
-        ).strip()
+        with _MODEL_TRAIN_LOCK:
+            answer = model.generate_response(user_prompt, max_length=160, temperature=0.7).strip()
         if answer and not _response_seems_low_confidence(answer):
             return answer
     except Exception as exc:
@@ -2249,13 +2363,10 @@ def generate_response(prompt, conversation_history=None):
     user_prompt = build_conversation_prompt(raw_prompt, history, memory_context)
 
     try:
-        response = ask_local_llama(
-            user_prompt,
-            system_prompt=_CONVERSATION_SYSTEM_PROMPT,
-            max_tokens=450,
-        )
+        with _MODEL_TRAIN_LOCK:
+            response = model.generate_response(user_prompt, max_length=120, temperature=0.7)
     except Exception as exc:
-        print(f"⚠️ Local llama unavailable, using fallback logic: {exc}")
+        print(f"⚠️ Model generation failed, using fallback logic: {exc}")
         response = ""
 
     # If Harold says he is unsure, research synchronously and return the best
@@ -2497,8 +2608,12 @@ def interactive_loop():
             continue
         
         if prompt.lower() == "save":
-            model.save_model("language_model.pkl")
-            print("💾 Model saved!\n")
+            model.save_model("language_model.npz")
+            ftp_saved = _save_model_to_ftp(model)
+            if ftp_saved:
+                print("💾 Safe model checkpoint saved locally and to FTP brain.\n")
+            else:
+                print("💾 Safe model checkpoint saved locally only; FTP is unavailable or not configured.\n")
             continue
         
         if training_mode:

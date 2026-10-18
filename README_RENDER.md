@@ -55,9 +55,12 @@ Pocket AI's MCF3 recall uses the same FTP credentials and base directory, but wr
 - Optional MEMORY_FTP_MAX_BYTES sets the maximum shard size (default 32 KiB; allowed range 1–64 KiB).
 - Render's local working cache is kept under /tmp and retains at most 50 MCF3 records by default; set MEMORY_LOCAL_CACHE_RECORDS to adjust the count.
 - The web chat sends only the current browser conversation's last six turns to the model. New conversations start with a fresh context.
+- Render runs the repository's small NumPy neural language model, bootstrapped from `create_training_data()`; it is not a pretrained GPT-class model, so answer quality is limited and all research claims still need sources.
+- Model checkpoints are stored as versioned compressed NPZ archives (not executable pickle) and the persistent checkpoint is `language_model_brain.npz` in the configured FTP base directory. FTP loading is capped at 64 MiB; if no compatible checkpoint exists, the app trains a bootstrap model and attempts to upload it.
+- The startup log reports FTP brain load/save outcomes. Existing legacy `.pkl` checkpoints are intentionally not unpickled; a new NPZ checkpoint is bootstrapped instead.
 - Users can explicitly ask Harold to remember a preference or project fact. Do not save passwords, private keys, recovery phrases, or API tokens.
 - Explicit `/search ...` requests and questions the language model cannot answer confidently use the existing multi-source verifier, then ask the model to explain the evidence naturally instead of returning the raw link list.
-- Conversation turns are sent by the browser as untrusted context (limited to six turns); MCF3 retrieval is also added as unverified context. These contexts go to the configured language-model endpoint, so set `LOCAL_LLAMA_URL` to an endpoint you trust and do not enter private secrets in the public chat.
+- Conversation turns are sent by the browser as untrusted context (limited to six turns); MCF3 retrieval is also added as unverified context. Do not enter private secrets in the public chat.
 
 What admin can do safely:
 - Insert base knowledge entries (topic + answer) at runtime

@@ -6,11 +6,17 @@ A neural network-based language model with dictionary integration
 
 import numpy as np
 import json
-import pickle
 import os
-from collections import defaultdict, Counter
+from pathlib import Path
+import zipfile
+from collections import Counter
 import requests
-from datetime import datetime
+
+
+MODEL_FORMAT_VERSION = 1
+MAX_MODEL_FILE_BYTES = 64 * 1024 * 1024
+MAX_MODEL_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
+MAX_MODEL_VOCAB_SIZE = 16_384
 
 class NeuralLanguageModel:
     def __init__(self, embedding_dim=128, hidden_dim=256, learning_rate=0.01):
@@ -301,7 +307,10 @@ class NeuralLanguageModel:
     def forward(self, word_indices, context_vector=None):
         """Forward pass through the network"""
         # Get embeddings
-        embedded = np.mean([self.embeddings[idx] for idx in word_indices if idx < self.vocab_size], axis=0)
+        valid_indices = [idx for idx in word_indices if 0 <= idx < self.vocab_size]
+        if not valid_indices:
+            valid_indices = [self.vocab.get('<UNK>', 1)]
+        embedded = np.mean([self.embeddings[idx] for idx in valid_indices], axis=0)
         embedded = embedded.reshape(1, -1)
         
         # Hidden layer
@@ -352,19 +361,22 @@ class NeuralLanguageModel:
                     grad_output[0, target_idx] -= 1
                     
                     # Update output weights
+                    output_weights = self.W_output.copy()
                     self.W_output -= self.learning_rate * np.dot(hidden.T, grad_output)
                     self.b_output -= self.learning_rate * grad_output
                     
-                    # Update hidden weights (simplified)
-                    grad_hidden = np.dot(grad_output, self.W_output.T) * (1 - hidden ** 2)
-                    embedded = np.mean([self.embeddings[idx] for idx in context_indices if idx < self.vocab_size], axis=0).reshape(1, -1)
+                    # Backpropagate through output, hidden activation, and mean embedding.
+                    grad_hidden = np.dot(grad_output, output_weights.T) * (1 - hidden ** 2)
+                    embedded = np.mean([self.embeddings[idx] for idx in context_indices if 0 <= idx < self.vocab_size], axis=0).reshape(1, -1)
+                    hidden_weights = self.W_hidden.copy()
                     self.W_hidden -= self.learning_rate * np.dot(embedded.T, grad_hidden)
                     self.b_hidden -= self.learning_rate * grad_hidden
                     
                     # Update embeddings
+                    grad_embedding = np.dot(grad_hidden, hidden_weights.T)[0]
                     for idx in context_indices:
-                        if idx < self.vocab_size:
-                            self.embeddings[idx] -= self.learning_rate * grad_hidden[0, :self.embedding_dim] / len(context_indices)
+                        if 0 <= idx < self.vocab_size:
+                            self.embeddings[idx] -= self.learning_rate * grad_embedding / len(context_indices)
             
             avg_loss = total_loss / max(num_examples, 1)
             print("  Epoch {}/{} - Loss: {:.4f}".format(epoch+1, epochs, avg_loss))
@@ -465,6 +477,8 @@ class NeuralLanguageModel:
             tokens = self.tokenize(text)
             for token in tokens:
                 if token not in self.vocab:
+                    if self.vocab_size >= MAX_MODEL_VOCAB_SIZE:
+                        continue
                     self.vocab[token] = self.vocab_size
                     self.reverse_vocab[self.vocab_size] = token
                     self.vocab_size += 1
@@ -482,54 +496,124 @@ class NeuralLanguageModel:
         # Quick training on new data
         self.train_on_text(texts, epochs=1)
     
-    def save_model(self, filepath="language_model.pkl"):
-        """Save model to disk"""
-        model_data = {
-            'vocab': self.vocab,
-            'reverse_vocab': self.reverse_vocab,
-            'vocab_size': self.vocab_size,
-            'embeddings': self.embeddings,
-            'W_hidden': self.W_hidden,
-            'W_output': self.W_output,
-            'W_context': self.W_context,
-            'b_hidden': self.b_hidden,
-            'b_output': self.b_output,
-            'word_definitions': self.word_definitions,
-            'word_synonyms': self.word_synonyms,
-            'word_count': self.word_count
+    def save_model(self, filepath="language_model.npz"):
+        """Save a versioned NumPy archive without executable pickle payloads."""
+        if not 0 < self.vocab_size <= MAX_MODEL_VOCAB_SIZE:
+            raise ValueError("Model vocabulary size is outside the supported range.")
+        if len(self.vocab) != self.vocab_size or set(self.vocab.values()) != set(range(self.vocab_size)):
+            raise ValueError("Model vocabulary indices are inconsistent.")
+        metadata = {
+            "format_version": MODEL_FORMAT_VERSION,
+            "embedding_dim": int(self.embedding_dim),
+            "hidden_dim": int(self.hidden_dim),
+            "learning_rate": float(self.learning_rate),
+            "vocab_size": int(self.vocab_size),
+            "vocab": self.vocab,
+            "word_count": {str(key): int(value) for key, value in self.word_count.items()},
+            "word_definitions": self.word_definitions,
+            "word_synonyms": self.word_synonyms,
         }
-        
-        with open(filepath, 'wb') as f:
-            pickle.dump(model_data, f)
-        
-        print("💾 Model saved to {}".format(filepath))
-    
-    def load_model(self, filepath="language_model.pkl"):
-        """Load model from disk"""
-        if os.path.exists(filepath):
+        metadata_bytes = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        arrays = {
+            "embeddings": np.asarray(self.embeddings, dtype=np.float32),
+            "W_hidden": np.asarray(self.W_hidden, dtype=np.float32),
+            "W_output": np.asarray(self.W_output, dtype=np.float32),
+            "W_context": np.asarray(self.W_context, dtype=np.float32),
+            "b_hidden": np.asarray(self.b_hidden, dtype=np.float32),
+            "b_output": np.asarray(self.b_output, dtype=np.float32),
+        }
+        expected_shapes = {
+            "embeddings": (self.vocab_size, self.embedding_dim),
+            "W_hidden": (self.embedding_dim, self.hidden_dim),
+            "W_output": (self.hidden_dim, self.vocab_size),
+            "W_context": (self.hidden_dim, self.hidden_dim),
+            "b_hidden": (1, self.hidden_dim),
+            "b_output": (1, self.vocab_size),
+        }
+        for name, shape in expected_shapes.items():
+            if arrays[name].shape != shape:
+                raise ValueError("Invalid model weight shape: {}".format(name))
+        if any(not np.isfinite(array).all() for array in arrays.values()):
+            raise ValueError("Refusing to save model with non-finite weights.")
+        target = Path(filepath)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + ".tmp")
+        try:
+            with temporary.open("wb") as output:
+                np.savez_compressed(output, metadata=np.frombuffer(metadata_bytes, dtype=np.uint8), **arrays)
+            if temporary.stat().st_size > MAX_MODEL_FILE_BYTES:
+                raise ValueError("Compressed model exceeds the 64 MiB persistence limit.")
+            os.replace(temporary, target)
+        finally:
             try:
-                with open(filepath, 'rb') as f:
-                    model_data = pickle.load(f)
-            except Exception as e:
-                print("⚠️ Failed to load model from {}: {}".format(filepath, str(e)))
-                return False
-            
-            self.vocab = model_data['vocab']
-            self.reverse_vocab = model_data['reverse_vocab']
-            self.vocab_size = model_data['vocab_size']
-            self.embeddings = model_data['embeddings']
-            self.W_hidden = model_data['W_hidden']
-            self.W_output = model_data['W_output']
-            self.W_context = model_data['W_context']
-            self.b_hidden = model_data['b_hidden']
-            self.b_output = model_data['b_output']
-            self.word_definitions = model_data['word_definitions']
-            self.word_synonyms = model_data['word_synonyms']
-            self.word_count = model_data['word_count']
-            
-            print("✅ Model loaded from {}".format(filepath))
-            return True
-        return False
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        print("💾 Model saved to {} (safe NPZ format)".format(filepath))
+
+    def load_model(self, filepath="language_model.npz"):
+        """Load a bounded, versioned NumPy archive without enabling pickle."""
+        if not os.path.exists(filepath):
+            return False
+        try:
+            if os.path.getsize(filepath) > MAX_MODEL_FILE_BYTES:
+                raise ValueError("Model archive exceeds the 64 MiB size limit.")
+            with zipfile.ZipFile(filepath) as archive:
+                if sum(info.file_size for info in archive.infolist()) > MAX_MODEL_UNCOMPRESSED_BYTES:
+                    raise ValueError("Model archive exceeds the uncompressed size limit.")
+            with np.load(filepath, allow_pickle=False) as archive:
+                metadata = json.loads(archive["metadata"].tobytes().decode("utf-8"))
+                if metadata.get("format_version") != MODEL_FORMAT_VERSION:
+                    raise ValueError("Unsupported model archive version.")
+                vocab = metadata["vocab"]
+                if not isinstance(vocab, dict) or any(
+                    not isinstance(word, str) or not isinstance(index, int) or isinstance(index, bool)
+                    for word, index in vocab.items()
+                ):
+                    raise ValueError("Invalid model vocabulary.")
+                vocab_size = len(vocab)
+                embedding_dim = int(metadata["embedding_dim"])
+                hidden_dim = int(metadata["hidden_dim"])
+                learning_rate = float(metadata["learning_rate"])
+                if (vocab_size != int(metadata.get("vocab_size", vocab_size))
+                        or not 0 < vocab_size <= MAX_MODEL_VOCAB_SIZE
+                        or not 1 <= embedding_dim <= 1024
+                        or not 1 <= hidden_dim <= 1024
+                        or not np.isfinite(learning_rate) or learning_rate <= 0
+                        or set(vocab.values()) != set(range(vocab_size))):
+                    raise ValueError("Invalid model metadata or vocabulary dimensions.")
+                expected_shapes = {
+                    "embeddings": (vocab_size, embedding_dim),
+                    "W_hidden": (embedding_dim, hidden_dim),
+                    "W_output": (hidden_dim, vocab_size),
+                    "W_context": (hidden_dim, hidden_dim),
+                    "b_hidden": (1, hidden_dim),
+                    "b_output": (1, vocab_size),
+                }
+                weights = {}
+                for name, shape in expected_shapes.items():
+                    value = np.asarray(archive[name], dtype=np.float32)
+                    if value.shape != shape or not np.isfinite(value).all():
+                        raise ValueError("Invalid model weight array: {}".format(name))
+                    weights[name] = value
+
+            self.embedding_dim = embedding_dim
+            self.hidden_dim = hidden_dim
+            self.learning_rate = learning_rate
+            self.vocab = {str(word): int(index) for word, index in vocab.items()}
+            self.reverse_vocab = {index: word for word, index in self.vocab.items()}
+            self.vocab_size = vocab_size
+            self.word_count = Counter(metadata.get("word_count", {}))
+            self.word_definitions = metadata.get("word_definitions", {})
+            self.word_synonyms = metadata.get("word_synonyms", {})
+            for name, value in weights.items():
+                setattr(self, name, value)
+        except Exception as e:
+            print("⚠️ Failed to load model from {}: {}".format(filepath, str(e)))
+            return False
+
+        print("✅ Model loaded from {} (safe NPZ format)".format(filepath))
+        return True
 
 
 def create_training_data():
