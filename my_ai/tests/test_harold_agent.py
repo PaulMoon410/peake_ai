@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from harold.agent import HaroldAgent, HaroldConfig, _Budget
+from harold.agent import HaroldAgent, HaroldConfig, _Budget, _progress_bar
 from harold.curator import MemoryCandidate
 from harold.discovery import Candidate
 from harold.journal import Journal
@@ -46,6 +46,11 @@ class FakeCurator:
 
 
 class HaroldAgentTests(unittest.TestCase):
+    def test_progress_bar_reports_clamped_percentages(self) -> None:
+        self.assertIn("0%", _progress_bar(0, 8))
+        self.assertIn(" 50%", _progress_bar(4, 8))
+        self.assertIn("100%", _progress_bar(10, 8))
+
     def test_budget_enforces_session_and_per_host_caps(self) -> None:
         budget = _Budget(pages_left=2, pages_per_host=1)
 

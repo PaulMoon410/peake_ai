@@ -34,6 +34,16 @@ from .urlguard import UrlRejected
 from .wiki import WikipediaSource
 
 
+def _progress_bar(done: int, total: int, width: int = 24) -> str:
+    """Render a percentage progress bar for webpage fetching."""
+    total = max(1, total)
+    progress = min(1.0, max(0.0, done / total))
+    filled = min(width, int(round(progress * width)))
+    pct = int(round(progress * 100))
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{bar}] {pct:3d}%"
+
+
 @dataclass(frozen=True, slots=True)
 class HaroldConfig:
     """Budgets and local journal location for a Harold reading session."""
@@ -43,6 +53,7 @@ class HaroldConfig:
     candidates_per_topic: int = 3
     links_per_page: int = 1
     use_model: bool = True
+    show_progress: bool = True
     journal_path: Path = Path(__file__).resolve().parent / "journal.jsonl"
 
     def __post_init__(self) -> None:
@@ -122,10 +133,14 @@ class HaroldAgent:
         self.curator = curator or Curator(model=model if callable(model) else None,
                                           use_model=self.config.use_model)
         self.journal = journal or Journal(self.config.journal_path)
+        self.pages_read: int = 0
+        self.pages_total: int = 0
 
     def learn(self, topic_limit: int = 4) -> list[TopicReport]:
         """Study the next uncovered curriculum topics within one session budget."""
         topics = next_topics(self.covered_topics(), limit=max(0, topic_limit))
+        self.pages_read = 0
+        self.pages_total = self.config.pages_per_session
         budget = _Budget(self.config.pages_per_session, self.config.pages_per_host)
         self.journal.append(JournalEntry.create(KIND_SESSION, detail=f"starting {len(topics)} topic(s)"))
         reports = [self._learn_topic(topic, budget) for topic in topics]
@@ -160,6 +175,12 @@ class HaroldAgent:
         """Fetch one candidate within budget, then curate and store observations."""
         if not budget.take(candidate.host):
             return None, ""
+        if self.config.show_progress and self.pages_total:
+            done = self.pages_total - budget.pages_left
+            print(
+                f"{_progress_bar(done, self.pages_total)} "
+                f"{done}/{self.pages_total} pages · {topic.name} · {candidate.host}"
+            )
         self.discovery.mark_seen(candidate.url)
         try:
             fetched = self.fetcher.page(candidate.url)
