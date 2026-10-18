@@ -1217,7 +1217,21 @@ class MemoryStore:
                     message = message.replace(secret, "[redacted]")
             if self.ftp_host:
                 message = message.replace(self.ftp_host, "[host]")
-            return False, f"{stage}: {type(exc).__name__}: {message[:180]}"
+            hints = {
+                "connecting": (
+                    "No FTP control connection was established. Check the hostname, port 21, "
+                    "server availability, and whether Render outbound connections are allowed."
+                ),
+                "authenticating": "The server answered, but login failed; check the FTP username and password.",
+                "opening configured directory": "Login succeeded; check the configured FTP base directory and access rights.",
+                "enabling FTPS data protection": "The server may not support explicit FTPS; check MEMORY_FTP_TLS.",
+                "checking current directory": "Login succeeded, but the server rejected PWD.",
+                "listing remote directory": (
+                    "Login succeeded, but directory listing failed; check LIST/NLST permission and passive FTP data ports."
+                ),
+            }
+            hint = hints.get(stage, "Check the FTP server settings and connectivity.")
+            return False, f"{stage}: {type(exc).__name__}: {message[:180]}. {hint}"
         finally:
             if client is not None:
                 try:

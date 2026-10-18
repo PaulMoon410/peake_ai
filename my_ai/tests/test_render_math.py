@@ -45,6 +45,10 @@ class RenderMathTests(unittest.TestCase):
         self.assertIn("const responseText = await res.text();", page_source)
         self.assertIn("Server returned a non-JSON response", page_source)
 
+        startup_source = (ROOT / "web_app.py").read_text(encoding="utf-8")
+        self.assertIn("SFTP is not used", startup_source)
+        self.assertIn("not upload permission", startup_source)
+
     def test_help_lists_only_supported_render_chat_commands(self) -> None:
         response = peakebot._handle_help_request("What are your commands?")
 

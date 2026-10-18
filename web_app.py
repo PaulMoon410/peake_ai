@@ -48,6 +48,13 @@ def _start_ftp_startup_check() -> None:
   def check() -> None:
     try:
       store = _get_mcf_memory_store()
+      if store.ftp_configured:
+        mode = "explicit FTPS" if store.ftp_tls else "plain FTP"
+        print(
+          f"[startup] MCF3 FTP probe: {store.ftp_host}:21 via {mode}; passive mode; "
+          "8s timeout. SFTP is not used. This probe checks login/listing only, not upload permission.",
+          flush=True,
+        )
       ok, detail = store.verify_ftp(timeout=8.0)
       state = "OK" if ok else ("NOT CONFIGURED" if detail == "not configured" else "FAILED")
       print(f"[startup] MCF3 FTP {state}: {detail}", flush=True)

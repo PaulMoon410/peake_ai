@@ -117,6 +117,7 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("TimeoutError", detail)
             self.assertIn("listing remote directory", detail)
+            self.assertIn("passive FTP data ports", detail)
             self.assertNotIn("private-user", detail)
             self.assertNotIn("private-password", detail)
 
