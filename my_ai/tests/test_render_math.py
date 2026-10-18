@@ -4,7 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -71,17 +71,42 @@ class RenderMathTests(unittest.TestCase):
         self.assertIn("not upload permission", startup_source)
 
     def test_render_chat_uses_the_bootstrapped_neural_model(self) -> None:
+        fake_model = Mock()
+        fake_model.generate_response.return_value = "The bootstrapped neural model answers this prompt."
         with tempfile.TemporaryDirectory() as folder:
             with (
                 patch.object(peakebot, "_get_mcf_memory_store", return_value=self.make_store(folder)),
                 patch.object(peakebot, "_retrieve_mcf_memory", return_value=""),
                 patch.object(peakebot, "remember"),
-                patch.object(peakebot.model, "generate_response", return_value="The bootstrapped neural model answers this prompt.") as generate,
+                patch.object(peakebot, "_get_language_model", return_value=fake_model),
             ):
                 answer = peakebot.generate_response("Can you describe clouds?")
 
         self.assertIn("bootstrapped neural model", answer)
-        generate.assert_called_once()
+        fake_model.generate_response.assert_called_once()
+
+    def test_model_initialization_is_lazy_and_thread_safe_accessor_caches(self) -> None:
+        previous = peakebot.model
+        fake_model = Mock()
+        try:
+            peakebot.model = None
+            with patch.object(peakebot, "_initialize_language_model", return_value=fake_model) as initialize:
+                self.assertIs(fake_model, peakebot._get_language_model())
+                self.assertIs(fake_model, peakebot._get_language_model())
+                initialize.assert_called_once_with()
+        finally:
+            peakebot.model = previous
+
+    def test_wsgi_starts_model_warmup_only_from_request_hook(self) -> None:
+        source = (ROOT / "web_app.py").read_text(encoding="utf-8")
+        bot_source = (ROOT / "peakebot.py").read_text(encoding="utf-8")
+
+        self.assertIsNone(peakebot.model)
+        self.assertIn("@app.before_request", source)
+        self.assertIn("_start_model_warmup()", source)
+        self.assertIn('name="model-warmup", daemon=True', source)
+        self.assertIn("Model loading is intentionally deferred", bot_source)
+        self.assertNotRegex(bot_source, r"(?m)^model = _initialize_language_model\(\)$")
 
     def test_help_lists_only_supported_render_chat_commands(self) -> None:
         response = peakebot._handle_help_request("What are your commands?")
@@ -190,7 +215,7 @@ class RenderMathTests(unittest.TestCase):
             with (
                 patch.object(peakebot, "_get_mcf_memory_store", return_value=store),
                 patch.object(peakebot, "remember") as remember,
-                patch.object(peakebot.model, "generate_response") as model,
+                patch.object(peakebot, "_get_language_model") as get_model,
             ):
                 answer = peakebot.generate_response("calculate 8 times 7")
 
@@ -199,7 +224,7 @@ class RenderMathTests(unittest.TestCase):
             self.assertEqual("Math", store.records[-1]["c"])
             self.assertIn("8 times 7 = 56", store.records[-1]["n"])
             remember.assert_called_once()
-            model.assert_not_called()
+            get_model.assert_not_called()
 
     def test_chat_learns_unverified_math_statement(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

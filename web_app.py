@@ -9,6 +9,7 @@ from my_ai.conversation import normalize_history
 
 from peakebot import (
   _get_mcf_memory_store,
+  warm_language_model,
   generate_response,
   add_base_knowledge_entry,
   list_base_knowledge_entries,
@@ -32,6 +33,8 @@ _ADMIN_RATE_LIMIT_REQUESTS = 40
 _ADMIN_REQUEST_LOG = defaultdict(deque)
 _FTP_STARTUP_CHECK_LOCK = threading.Lock()
 _FTP_STARTUP_CHECK_STARTED = False
+_MODEL_WARMUP_LOCK = threading.Lock()
+_MODEL_WARMUP_STARTED = False
 
 ADMIN_PANEL_ENABLED = os.getenv("ADMIN_PANEL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
@@ -64,10 +67,26 @@ def _start_ftp_startup_check() -> None:
   threading.Thread(target=check, name="ftp-startup-check", daemon=True).start()
 
 
+def _start_model_warmup() -> None:
+  """Initialize/train/load the own model in background after Gunicorn binds."""
+  global _MODEL_WARMUP_STARTED
+  with _MODEL_WARMUP_LOCK:
+    if _MODEL_WARMUP_STARTED:
+      return
+    _MODEL_WARMUP_STARTED = True
+
+  def warm() -> None:
+    print("[startup] Own language model warm-up started in background.", flush=True)
+    warm_language_model()
+
+  threading.Thread(target=warm, name="model-warmup", daemon=True).start()
+
+
 @app.before_request
 def _kickoff_ftp_startup_check() -> None:
-  # Keep Render startup/health responses fast; this runs once in the background.
+  # Gunicorn has bound the listener; keep readiness requests fast during warm-up.
   _start_ftp_startup_check()
+  _start_model_warmup()
 
 
 def _check_rate_limit(client_ip: str) -> bool:

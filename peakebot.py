@@ -48,6 +48,7 @@ FTP_USER = os.getenv("FTP_USER", "<REDACTED_FTP_USER>").strip()
 FTP_PASS = os.getenv("FTP_PASS", "<REDACTED_FTP_PASS>").strip()
 FTP_BASE_DIR = os.getenv("FTP_BASE_DIR", "<REDACTED_FTP_BASE_DIR>").strip()
 FTP_UPLOAD_BATCH_SIZE = int(os.getenv("FTP_UPLOAD_BATCH_SIZE", "3"))
+MODEL_FTP_TIMEOUT_SECONDS = 8
 LEARNING_QUEUE_FILE = "learning_queue.json"
 LEARNED_TOPICS_FILE = "learned_topics.json"
 KNOWLEDGE_OVERRIDES_FILE = "base_knowledge_overrides.json"
@@ -240,6 +241,8 @@ _BACKGROUND_RESEARCH_PENDING = set()
 _BACKGROUND_RESEARCH_LOCK = threading.Lock()
 _BACKGROUND_RESEARCH_STARTED = False
 _MODEL_TRAIN_LOCK = threading.Lock()
+_MODEL_INITIALIZE_LOCK = threading.Lock()
+model: NeuralLanguageModel | None = None
 _FTP_PENDING_ENTRIES = []
 
 
@@ -282,6 +285,27 @@ def _initialize_language_model() -> NeuralLanguageModel:
         print("⚠️ Safe checkpoint unavailable; bootstrapped a minimal model for startup")
 
     return model
+
+
+def _get_language_model() -> NeuralLanguageModel:
+    """Initialize the custom model once, on demand, rather than at WSGI import."""
+    global model
+    if model is not None:
+        return model
+    with _MODEL_INITIALIZE_LOCK:
+        if model is None:
+            print("🧠 Initializing Harold's own language model...", flush=True)
+            model = _initialize_language_model()
+            print("🧠 Harold's language model is ready.", flush=True)
+        return model
+
+
+def warm_language_model() -> None:
+    """Warm the own model after Gunicorn has bound the HTTP listener."""
+    try:
+        _get_language_model()
+    except Exception as exc:
+        print(f"⚠️ Own language model startup failed: {type(exc).__name__}: {str(exc)[:180]}", flush=True)
 
 
 def _tmp_path(filename: str) -> str:
@@ -415,17 +439,17 @@ def _save_model_to_ftp(model) -> bool:
     """
     if not _ftp_model_credentials_configured():
         return False
+    ftp = None
     try:
         local_path = _tmp_path("language_model_brain.npz")
         model.save_model(local_path)
-        ftp = FTP(timeout=15)
-        ftp.connect(FTP_HOST, timeout=15)
+        ftp = FTP(timeout=MODEL_FTP_TIMEOUT_SECONDS)
+        ftp.connect(FTP_HOST, timeout=MODEL_FTP_TIMEOUT_SECONDS)
         ftp.login(FTP_USER, FTP_PASS)
         ftp.set_pasv(True)
         _ensure_ftp_directory(ftp, FTP_BASE_DIR)
         with open(local_path, "rb") as f:
             ftp.storbinary("STOR language_model_brain.npz", f)
-        ftp.quit()
         print(f"🧠 Safe model checkpoint saved to FTP ({os.path.getsize(local_path)} bytes).")
         return True
     except Exception as e:
@@ -435,6 +459,12 @@ def _save_model_to_ftp(model) -> bool:
                 message = message.replace(secret, "[redacted]")
         print(f"⚠️ FTP model save failed: {type(e).__name__}: {message[:180]}")
         return False
+    finally:
+        if ftp is not None:
+            try:
+                ftp.quit()
+            except Exception:
+                ftp.close()
 
 
 def _load_model_from_ftp(model) -> bool:
@@ -444,10 +474,11 @@ def _load_model_from_ftp(model) -> bool:
     """
     if not _ftp_model_credentials_configured():
         return False
+    ftp = None
     try:
         local_path = _tmp_path("language_model_brain.npz")
-        ftp = FTP(timeout=15)
-        ftp.connect(FTP_HOST, timeout=15)
+        ftp = FTP(timeout=MODEL_FTP_TIMEOUT_SECONDS)
+        ftp.connect(FTP_HOST, timeout=MODEL_FTP_TIMEOUT_SECONDS)
         ftp.login(FTP_USER, FTP_PASS)
         ftp.set_pasv(True)
         _ensure_ftp_directory(ftp, FTP_BASE_DIR)
@@ -469,7 +500,6 @@ def _load_model_from_ftp(model) -> bool:
                 f.write(chunk)
 
             ftp.retrbinary("RETR language_model_brain.npz", write_limited)
-        ftp.quit()
         loaded = model.load_model(local_path)
         if loaded:
             print(f"🧠 Safe model checkpoint loaded from FTP ({os.path.getsize(local_path)} bytes).")
@@ -481,10 +511,15 @@ def _load_model_from_ftp(model) -> bool:
                 message = message.replace(secret, "[redacted]")
         print(f"⚠️ FTP model load failed (no compatible brain): {type(e).__name__}: {message[:180]}")
         return False
+    finally:
+        if ftp is not None:
+            try:
+                ftp.quit()
+            except Exception:
+                ftp.close()
 
 
-# Load the language model (after FTP brain functions are defined)
-model = _initialize_language_model()
+# Model loading is intentionally deferred until the first HTTP request, after Gunicorn binds.
 
 
 def _load_base_knowledge_overrides() -> dict:
@@ -580,19 +615,20 @@ def _flush_online_learning(force: bool = False):
     batch = items[:ONLINE_LEARNING_BATCH_SIZE]
     remaining = items[ONLINE_LEARNING_BATCH_SIZE:]
     learned = 0
+    active_model = _get_language_model()
 
     with _MODEL_TRAIN_LOCK:
         for sample in batch:
             try:
-                model.learn_from_conversation(sample.get("prompt", ""), sample.get("response", ""))
+                active_model.learn_from_conversation(sample.get("prompt", ""), sample.get("response", ""))
                 learned += 1
             except Exception as e:
                 print(f"⚠️ Online learning sample skipped: {str(e)}")
 
         if learned > 0:
             try:
-                model.save_model("language_model.npz")
-                ftp_saved = _save_model_to_ftp(model)
+                active_model.save_model("language_model.npz")
+                ftp_saved = _save_model_to_ftp(active_model)
                 if not ftp_saved:
                     status = "FTP checkpoint upload failed" if _ftp_model_credentials_configured() else "FTP checkpoint not configured"
                     print(f"⚠️ Online model checkpoint is local-only: {status}.")
@@ -1001,8 +1037,9 @@ def _run_background_research(query: str, reason: str = ""):
     ]
     if snippet_texts:
         try:
+            active_model = _get_language_model()
             with _MODEL_TRAIN_LOCK:
-                model.train_on_text(snippet_texts, epochs=1)
+                active_model.train_on_text(snippet_texts, epochs=1)
             print(f"🤖 Background research learned {len(snippet_texts)} snippet(s) for '{query}' ({reason or 'auto'})")
         except Exception as e:
             print(f"⚠️ Background learning failed for '{query}': {str(e)}")
@@ -1478,8 +1515,9 @@ def process_learning_queue(max_topics: int = 3):
                 
                 if snippet_texts:
                     try:
+                        active_model = _get_language_model()
                         with _MODEL_TRAIN_LOCK:
-                            model.train_on_text(snippet_texts, epochs=1)
+                            active_model.train_on_text(snippet_texts, epochs=1)
                         learned_data["topics"].append({
                             "topic": topic,
                             "timestamp": datetime.now().isoformat(),
@@ -1506,8 +1544,9 @@ def process_learning_queue(max_topics: int = 3):
             json.dump(learned_data, f, indent=2)
         
         # Save model after learning
-        model.save_model("language_model.npz")
-        ftp_saved = _save_model_to_ftp(model)
+        active_model = _get_language_model()
+        active_model.save_model("language_model.npz")
+        ftp_saved = _save_model_to_ftp(active_model)
         if ftp_saved:
             print(f"\n🎓 Learning session complete! Processed {processed} topics; model checkpoint saved to FTP.")
         else:
@@ -2260,8 +2299,9 @@ def _answer_from_research(prompt, hits, history, memory_context):
         return "I couldn't find useful sources for that yet. Could you narrow the question or tell me which part matters most?"
     user_prompt = build_research_prompt(prompt, hits, history, memory_context)
     try:
+        active_model = _get_language_model()
         with _MODEL_TRAIN_LOCK:
-            answer = model.generate_response(user_prompt, max_length=160, temperature=0.7).strip()
+            answer = active_model.generate_response(user_prompt, max_length=160, temperature=0.7).strip()
         if answer and not _response_seems_low_confidence(answer):
             return answer
     except Exception as exc:
@@ -2363,8 +2403,9 @@ def generate_response(prompt, conversation_history=None):
     user_prompt = build_conversation_prompt(raw_prompt, history, memory_context)
 
     try:
+        active_model = _get_language_model()
         with _MODEL_TRAIN_LOCK:
-            response = model.generate_response(user_prompt, max_length=120, temperature=0.7)
+            response = active_model.generate_response(user_prompt, max_length=120, temperature=0.7)
     except Exception as exc:
         print(f"⚠️ Model generation failed, using fallback logic: {exc}")
         response = ""
@@ -2608,8 +2649,9 @@ def interactive_loop():
             continue
         
         if prompt.lower() == "save":
-            model.save_model("language_model.npz")
-            ftp_saved = _save_model_to_ftp(model)
+            active_model = _get_language_model()
+            active_model.save_model("language_model.npz")
+            ftp_saved = _save_model_to_ftp(active_model)
             if ftp_saved:
                 print("💾 Safe model checkpoint saved locally and to FTP brain.\n")
             else:
@@ -2629,7 +2671,9 @@ def interactive_loop():
                     user_input = parts[0].strip()
                     desired_response = parts[1].strip()
                     # Train model with this example
-                    model.train_on_text([user_input + " " + desired_response], epochs=1)
+                    active_model = _get_language_model()
+                    with _MODEL_TRAIN_LOCK:
+                        active_model.train_on_text([user_input + " " + desired_response], epochs=1)
                     print(f"✅ Learned: '{user_input}' -> '{desired_response}'\n")
                     continue
             
