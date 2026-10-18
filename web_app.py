@@ -48,7 +48,7 @@ def _start_ftp_startup_check() -> None:
   def check() -> None:
     try:
       store = _get_mcf_memory_store()
-      ok, detail = store.verify_ftp(timeout=3.0)
+      ok, detail = store.verify_ftp(timeout=8.0)
       state = "OK" if ok else ("NOT CONFIGURED" if detail == "not configured" else "FAILED")
       print(f"[startup] MCF3 FTP {state}: {detail}", flush=True)
     except Exception as exc:

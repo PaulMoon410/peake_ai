@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 # Ensure project root is in sys.path
 ROOT = Path(__file__).resolve().parent.parent
@@ -98,7 +98,7 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertIn("login/list OK", detail)
             self.assertIn("1 directory entries", detail)
             self.assertIn("write permission not tested", detail)
-            connect.assert_called_once_with(timeout=1.5)
+            connect.assert_called_once_with(timeout=1.5, stage_callback=ANY)
 
     def test_verify_ftp_does_not_include_credentials_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -107,11 +107,16 @@ class MemoryStoreTests(unittest.TestCase):
             store.ftp_user = "private-user"
             store.ftp_password = "private-password"
 
-            with patch.object(store, "_connect", side_effect=RuntimeError("login failed for private-user private-password")):
+            def timeout_during_list(*, timeout: float, stage_callback) -> None:
+                stage_callback("listing remote directory")
+                raise TimeoutError("login failed for private-user private-password")
+
+            with patch.object(store, "_connect", side_effect=timeout_during_list):
                 ok, detail = store.verify_ftp()
 
             self.assertFalse(ok)
-            self.assertIn("RuntimeError", detail)
+            self.assertIn("TimeoutError", detail)
+            self.assertIn("listing remote directory", detail)
             self.assertNotIn("private-user", detail)
             self.assertNotIn("private-password", detail)
 

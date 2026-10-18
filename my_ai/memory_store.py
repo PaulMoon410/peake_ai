@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date
 import ftplib
 import io
@@ -1152,7 +1153,11 @@ class MemoryStore:
             used += extra
         return "\n".join(selected)
 
-    def _connect(self, timeout: float = 20.0) -> ftplib.FTP:
+    def _connect(
+        self,
+        timeout: float = 20.0,
+        stage_callback: Callable[[str], None] | None = None,
+    ) -> ftplib.FTP:
         if not self.ftp_configured:
             if self.ftp_partially_configured:
                 raise RuntimeError("Set MEMORY_FTP_HOST, MEMORY_FTP_USER, and MEMORY_FTP_PASSWORD to enable sync.")
@@ -1161,27 +1166,45 @@ class MemoryStore:
             client: ftplib.FTP = ftplib.FTP_TLS(context=ssl.create_default_context())
         else:
             client = ftplib.FTP()
+        if stage_callback:
+            stage_callback("connecting")
         client.connect(self.ftp_host, timeout=timeout)
+        if stage_callback:
+            stage_callback("authenticating")
         client.login(self.ftp_user, self.ftp_password)
         if self.ftp_base_dir:
+            if stage_callback:
+                stage_callback("opening configured directory")
             client.cwd(self.ftp_base_dir)
         if self.ftp_tls and isinstance(client, ftplib.FTP_TLS):
+            if stage_callback:
+                stage_callback("enabling FTPS data protection")
             client.prot_p()
         if hasattr(client, "set_pasv"):
+            if stage_callback:
+                stage_callback("enabling passive mode")
             try:
                 client.set_pasv(True)
             except Exception:
                 pass
         return client
 
-    def verify_ftp(self, timeout: float = 3.0) -> tuple[bool, str]:
+    def verify_ftp(self, timeout: float = 8.0) -> tuple[bool, str]:
         """Verify FTP login and directory listing without writing remote data."""
         if not self.ftp_configured:
             return False, "not configured"
         client: ftplib.FTP | None = None
+        stage = "connecting"
+
+        def update_stage(value: str) -> None:
+            nonlocal stage
+            stage = value
+
         try:
-            client = self._connect(timeout=timeout)
+            client = self._connect(timeout=timeout, stage_callback=update_stage)
+            stage = "checking current directory"
             client.pwd()
+            stage = "listing remote directory"
             visible_entries = client.nlst()
             return True, (
                 f"connected; login/list OK; {len(visible_entries)} directory entries visible; "
@@ -1194,7 +1217,7 @@ class MemoryStore:
                     message = message.replace(secret, "[redacted]")
             if self.ftp_host:
                 message = message.replace(self.ftp_host, "[host]")
-            return False, f"{type(exc).__name__}: {message[:180]}"
+            return False, f"{stage}: {type(exc).__name__}: {message[:180]}"
         finally:
             if client is not None:
                 try:
