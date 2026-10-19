@@ -242,7 +242,9 @@ _BACKGROUND_RESEARCH_LOCK = threading.Lock()
 _BACKGROUND_RESEARCH_STARTED = False
 _MODEL_TRAIN_LOCK = threading.Lock()
 _MODEL_INITIALIZE_LOCK = threading.Lock()
+_INTENT_LEARNER_LOCK = threading.Lock()
 model: NeuralLanguageModel | None = None
+intent_learner: IntentLearner | None = None
 _FTP_PENDING_ENTRIES = []
 
 
@@ -306,6 +308,19 @@ def warm_language_model() -> None:
         _get_language_model()
     except Exception as exc:
         print(f"⚠️ Own language model startup failed: {type(exc).__name__}: {str(exc)[:180]}", flush=True)
+
+
+def _get_intent_learner() -> IntentLearner:
+    """Initialize the intent learner once, lazily, on first chat turn."""
+    global intent_learner
+    if intent_learner is not None:
+        return intent_learner
+    with _INTENT_LEARNER_LOCK:
+        if intent_learner is None:
+            store = _get_mcf_memory_store()
+            intent_learner = IntentLearner(store)
+            print(f"🎯 Intent learner ready ({len(intent_learner.intents)} intent type(s) loaded).", flush=True)
+        return intent_learner
 
 
 def _tmp_path(filename: str) -> str:
@@ -2329,6 +2344,212 @@ _CONVERSATION_SYSTEM_PROMPT = (
 )
 
 
+_INTENT_STOP_WORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
+    "aren't", "as", "at", "be", "because", "been", "before", "being", "below", "between", "both",
+    "but", "by", "can", "cannot", "could", "couldn't", "did", "didn't", "do", "does", "doesn't",
+    "doing", "don't", "down", "during", "each", "few", "for", "from", "further", "had", "hadn't",
+    "has", "hasn't", "have", "haven't", "having", "he", "her", "here", "hers", "herself", "him",
+    "himself", "his", "i", "if", "in", "into", "is", "isn't", "it", "its", "itself", "just",
+    "me", "more", "most", "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only",
+    "or", "other", "our", "ours", "ourselves", "out", "over", "own", "please", "same", "she",
+    "should", "shouldn't", "so", "some", "such", "than", "that", "the", "their", "theirs", "them",
+    "themselves", "then", "there", "these", "they", "this", "those", "through", "to", "too",
+    "under", "until", "up", "very", "was", "wasn't", "we", "were", "weren't", "when", "where",
+    "which", "while", "who", "whom", "why", "will", "with", "won't", "would", "wouldn't",
+    "you", "your", "yours", "yourself", "yourselves",
+}
+
+_WORD_RE = re.compile(r"[a-z0-9]+", re.UNICODE)
+
+
+def _tokens(text: str) -> set[str]:
+    """Tokenize for intent matching: keep digits (math) and intent-signaling words."""
+    tokens = set()
+    for w in _WORD_RE.findall(text.casefold()):
+        if w in _INTENT_STOP_WORDS:
+            continue
+        if len(w) >= 2 or any(c.isdigit() for c in w):
+            tokens.add(w)
+    return tokens
+
+
+_INTENT_CATEGORY = "Harold/Understanding/Intents"
+_ALLOWED_INTENT_TYPES = frozenset({"math", "remember", "search", "website", "recall_math", "recall_memory"})
+_MAX_INTENT_EXAMPLES_PER_TYPE = 24
+_MIN_INTENT_MATCH_SCORE = 0.4
+
+
+class IntentLearner:
+    """Learns phrase-to-action mappings from conversation, applied linguistically.
+
+    Harold watches which user wordings lead to successful actions (math, memory,
+    search, and website reading) and stores those phrase→intent mappings in
+    MCF3 memory. Later, free-form input that semantically matches a learned phrase
+    triggers the same action without requiring an exact command.
+    """
+
+    def __init__(self, store) -> None:
+        self.store = store
+        self.intents: dict[str, list[str]] = {}
+        self._load_intents()
+
+    def _load_intents(self) -> None:
+        try:
+            query = f"cat:{_INTENT_CATEGORY} INTENT"
+            if getattr(self.store, "ftp_configured", False):
+                notes = self.store.relevant_remote(query, limit=100, max_chars=24000)
+            else:
+                notes = self.store.relevant(query, limit=100, max_chars=24000)
+        except Exception:
+            try:
+                notes = self.store.relevant(f"cat:{_INTENT_CATEGORY} INTENT", limit=100, max_chars=24000)
+            except Exception:
+                notes = ""
+        if not notes:
+            return
+        for line in notes.splitlines():
+            if not line.startswith("- ["):
+                continue
+            # Extract note text after "] "
+            payload = line.split("] ", 1)[-1] if "] " in line else line
+            marker = "INTENT:"
+            if marker not in payload:
+                continue
+            body = payload[payload.index(marker) + len(marker):].strip()
+            parts = [p.strip() for p in body.split("||")]
+            if len(parts) < 2:
+                continue
+            action_type = parts[0]
+            examples = [p for p in parts[1:] if p]
+            if action_type in _ALLOWED_INTENT_TYPES and examples:
+                known = self.intents.setdefault(action_type, [])
+                for example in examples:
+                    if example not in known and len(known) < _MAX_INTENT_EXAMPLES_PER_TYPE:
+                        known.append(example)
+
+    def learn_intent(self, phrase: str, action_type: str) -> None:
+        """Record that `phrase` reliably maps to `action_type`."""
+        phrase = phrase.strip()
+        if (action_type not in _ALLOWED_INTENT_TYPES or len(phrase) < 4 or len(phrase) > 200
+            or "||" in phrase
+                or _SENSITIVE_MEMORY_RE.search(phrase)):
+            return
+        examples = self.intents.setdefault(action_type, [])
+        if phrase in examples or len(examples) >= _MAX_INTENT_EXAMPLES_PER_TYPE:
+            return
+        examples.append(phrase)
+        try:
+            note = f"INTENT:{action_type} || {phrase}"
+            record = self.store.add(note, category=_INTENT_CATEGORY)
+            if record and getattr(self.store, "ftp_configured", False):
+                try:
+                    self.store.upload(record)
+                except Exception as exc:
+                    print(f"⚠️ Intent FTP upload failed: {type(exc).__name__}: {str(exc)[:160]}")
+        except Exception as exc:
+            print(f"⚠️ Intent persistence failed: {exc}")
+
+    def match_intent(self, phrase: str) -> tuple[str, float] | None:
+        """Return (intent_type, confidence) for the best matching learned intent."""
+        if not self.intents:
+            return None
+        query_tokens = _tokens(phrase)
+        if len(query_tokens) < 2:
+            return None
+        best_type: str | None = None
+        best_score = 0.0
+        for action_type, examples in self.intents.items():
+            for example in examples:
+                example_tokens = _tokens(example)
+                if not example_tokens:
+                    continue
+                overlap = len(query_tokens & example_tokens)
+                union = len(query_tokens | example_tokens)
+                score = overlap / union if union else 0.0
+                if overlap >= 2 and score > best_score:
+                    best_score = score
+                    best_type = action_type
+        if best_type is not None and best_score >= _MIN_INTENT_MATCH_SCORE:
+            return best_type, best_score
+        return None
+
+
+def _apply_intent_action(
+    intent_type: str,
+    original_prompt: str,
+) -> str | None:
+    """Execute a learned intent, returning a response string or None to fall through."""
+    if intent_type == "math":
+        return _handle_math_request(original_prompt) or _calculate_from_phrase(original_prompt)
+    if intent_type == "remember":
+        return _save_explicit_mcf_memory(original_prompt)
+    if intent_type == "search":
+        return _search_web_from_phrase(original_prompt)
+    if intent_type == "website":
+        return _learn_from_website_from_phrase(original_prompt)
+    if intent_type == "recall_math":
+        return _recall_math_notes(_strip_action_words(original_prompt))
+    if intent_type == "recall_memory":
+        return _retrieve_mcf_memory(_strip_action_words(original_prompt)) or "I don't have a matching memory note for that yet."
+    return None
+
+
+def _calculate_from_phrase(phrase: str) -> str | None:
+    """Pull a math expression out of free-form language and evaluate it."""
+    expression = ""
+    calculate_match = _MATH_CALCULATE_RE.match(phrase)
+    if calculate_match:
+        expression = calculate_match.group(1).strip()
+    else:
+        what_is_match = _MATH_WHAT_IS_RE.match(phrase)
+        if what_is_match:
+            expression = what_is_match.group(1).strip()
+        elif _is_simple_math_expression(phrase):
+            expression = phrase
+    if expression and _is_simple_math_expression(expression):
+        return _handle_math_request(expression)
+    return None
+
+
+def _search_web_from_phrase(phrase: str) -> str | None:
+    cleaned = phrase.casefold()
+    for prefix in ("search web:", "search for", "look up", "find", "research"):
+        if cleaned.startswith(prefix):
+            query = phrase[len(prefix):].strip(" :,-")
+            if query:
+                return _search_web_verified_answer(query)
+    return None
+
+
+def _learn_from_website_from_phrase(phrase: str) -> str | None:
+    m = re.search(r"https?://\S+", phrase)
+    if m:
+        return _learn_from_website_url(m.group(0).rstrip(".,;!"))
+    return None
+
+
+def _strip_action_words(phrase: str) -> str:
+    cleaned = phrase.casefold()
+    for prefix in ("recall math about", "recall math", "remember", "recall", "search web:", "learn from"):
+        if cleaned.startswith(prefix):
+            return phrase[len(prefix):].strip(" :,-")
+    return phrase
+
+
+def _search_web_verified_answer(query: str) -> str | None:
+    try:
+        result = search_web_verified(query)
+        if not isinstance(result, dict):
+            return None
+        hits = result.get("hits", [])
+        if not hits:
+            return None
+        return _answer_from_research(query, hits, [], "")
+    except Exception:
+        return None
+
+
 def generate_response(prompt, conversation_history=None):
     """Answer conversationally, recall MCF3 context, and synthesize web research when needed."""
     raw_prompt = (prompt or "").strip()
@@ -2344,19 +2565,43 @@ def generate_response(prompt, conversation_history=None):
 
     website_learning_response = _handle_website_learning_request(raw_prompt)
     if website_learning_response is not None:
+        if " extracted " in website_learning_response and "Source:" in website_learning_response:
+            _get_intent_learner().learn_intent(raw_prompt, "website")
         remember(raw_prompt, website_learning_response)
         return website_learning_response
 
     math_response = _handle_math_request(raw_prompt)
     if math_response is not None:
+        if math_response.startswith(("Verified arithmetic:", "Saved as an unverified math note:", "I already have")):
+            _get_intent_learner().learn_intent(raw_prompt, "math")
         remember(raw_prompt, math_response)
         return math_response
 
     saved_response = _save_explicit_mcf_memory(raw_prompt)
     if saved_response is not None:
+        if saved_response.startswith(("Got it—", "I already have")):
+            _get_intent_learner().learn_intent(raw_prompt, "remember")
         if not _SENSITIVE_MEMORY_RE.search(raw_prompt):
             remember(raw_prompt, saved_response)
         return saved_response
+
+    # NEW: Linguistic intent matching — Harold applies learned phrase→action
+    # mappings without requiring exact command syntax.
+    try:
+        learner = _get_intent_learner()
+        matched = learner.match_intent(raw_prompt)
+        if matched:
+            intent_type, confidence = matched
+            intent_response = _apply_intent_action(
+                intent_type, raw_prompt
+            )
+            if intent_response is not None:
+                # Remember the successful mapping so Harold learns it linguistically.
+                learner.learn_intent(raw_prompt, intent_type)
+                remember(raw_prompt, intent_response)
+                return intent_response
+    except Exception as exc:
+        print(f"⚠️ Intent matching failed: {exc}")
 
     # Handle simple identity/greeting requests without spending time on research.
     basic_reply = _match_basic_interaction(pl)
@@ -2397,6 +2642,8 @@ def generate_response(prompt, conversation_history=None):
     if web_trigger:
         verified = research()
         response = _answer_from_research(raw_prompt, verified.get("hits", []), history, memory_context)
+        if verified.get("hits"):
+            _get_intent_learner().learn_intent(raw_prompt, "search")
         remember(raw_prompt, response)
         return response
 
@@ -2417,6 +2664,10 @@ def generate_response(prompt, conversation_history=None):
         if verified.get("hits"):
             response = _answer_from_research(raw_prompt, verified["hits"], history, memory_context)
             response = response.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
+            try:
+                _get_intent_learner().learn_intent(raw_prompt, "search")
+            except Exception:
+                pass
             remember(raw_prompt, response)
             return response
 

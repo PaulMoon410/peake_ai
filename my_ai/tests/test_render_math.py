@@ -47,6 +47,77 @@ class RenderMathTests(unittest.TestCase):
         finally:
             peakebot.FTP_HOST, peakebot.FTP_USER, peakebot.FTP_PASS = previous
 
+    def test_intent_learner_bounds_and_matches_only_known_action_examples(self) -> None:
+        from unittest.mock import Mock
+
+        store = Mock()
+        store.ftp_configured = False
+        store.relevant.return_value = (
+            "- [Harold/Understanding/Intents] INTENT:math || learn math: 2 plus 2"
+        )
+        learner = peakebot.IntentLearner(store)
+
+        self.assertIsNone(learner.match_intent("math"))
+        match = learner.match_intent("please learn math: 2 plus 2")
+        self.assertIsNotNone(match)
+        self.assertEqual("math", match[0] if match else None)
+
+    def test_intent_learner_loads_shared_intents_from_ftp_archive(self) -> None:
+        from unittest.mock import Mock
+
+        store = Mock()
+        store.ftp_configured = True
+        store.relevant_remote.return_value = (
+            "- [Harold/Understanding/Intents] INTENT:search || search web: python decorators\n"
+            "- [Harold/Understanding/Intents] INTENT:shell || arbitrary action"
+        )
+        learner = peakebot.IntentLearner(store)
+
+        self.assertIn("search web: python decorators", learner.intents["search"])
+        self.assertNotIn("shell", learner.intents)
+        store.relevant_remote.assert_called_once_with(
+            "cat:Harold/Understanding/Intents INTENT", limit=100, max_chars=24000,
+        )
+
+    def test_intent_learning_persists_each_example_to_shared_ftp(self) -> None:
+        from unittest.mock import Mock
+
+        store = Mock()
+        store.ftp_configured = True
+        store.relevant.return_value = ""
+        store.relevant_remote.return_value = ""
+        record = {"i": "0123456789ab", "n": "INTENT:math || do arithmetic", "c": "Harold/Understanding/Intents"}
+        store.add.return_value = record
+        learner = peakebot.IntentLearner(store)
+
+        learner.learn_intent("do arithmetic", "math")
+
+        store.add.assert_called_once_with(
+            "INTENT:math || do arithmetic", category="Harold/Understanding/Intents",
+        )
+        store.upload.assert_called_once_with(record)
+
+    def test_intent_learning_rejects_unknown_actions_and_sensitive_phrases(self) -> None:
+        from unittest.mock import Mock
+
+        store = Mock()
+        store.ftp_configured = False
+        store.relevant.return_value = ""
+        learner = peakebot.IntentLearner(store)
+
+        learner.learn_intent("run arbitrary command", "shell")
+        learner.learn_intent("remember my password is secret", "remember")
+        learner.learn_intent("intent injection || search", "math")
+
+        store.add.assert_not_called()
+
+    def test_learned_website_intent_passes_url_to_safe_reader(self) -> None:
+        with patch.object(peakebot, "_learn_from_website_url", return_value="read result") as read_url:
+            result = peakebot._learn_from_website_from_phrase("please study this page https://example.org/guide")
+
+        self.assertEqual("read result", result)
+        read_url.assert_called_once_with("https://example.org/guide")
+
     def make_store(self, folder: str) -> MemoryStore:
         return MemoryStore(Path(folder) / "memory.jsonl")
 
