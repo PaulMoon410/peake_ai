@@ -3181,6 +3181,16 @@ def _store_ai_chat(prompt: str, response: str, provider: str) -> str:
     return storage
 
 
+def _log_ai_error(provider: str, res) -> None:
+    """Log detailed AI provider error including the response body."""
+    body = ""
+    try:
+        body = res.text[:300]
+    except Exception:
+        pass
+    print(f"⚠️ {provider} returned HTTP {res.status_code}: {body}")
+
+
 def _ai_chat_openai(system: str, user: str) -> str | None:
     """OpenAI chat completions — primary AI provider."""
     if not OPENAI_API_KEY:
@@ -3205,7 +3215,7 @@ def _ai_chat_openai(system: str, user: str) -> str | None:
             timeout=20,
         )
         if res.status_code != 200:
-            print(f"⚠️ OpenAI returned HTTP {res.status_code}")
+            _log_ai_error("OpenAI", res)
             return None
         data = res.json()
         answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
@@ -3236,7 +3246,7 @@ def _ai_chat_anthropic(system: str, user: str) -> str | None:
             timeout=20,
         )
         if res.status_code != 200:
-            print(f"⚠️ Anthropic returned HTTP {res.status_code}")
+            _log_ai_error("Anthropic", res)
             return None
         data = res.json()
         answer = data.get("content", [{}])[0].get("text", "").strip()
@@ -3261,7 +3271,7 @@ def _ai_chat_google(system: str, user: str) -> str | None:
             timeout=20,
         )
         if res.status_code != 200:
-            print(f"⚠️ Google returned HTTP {res.status_code}")
+            _log_ai_error("Google", res)
             return None
         data = res.json()
         answer = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
@@ -3294,7 +3304,7 @@ def _ai_chat_groq(system: str, user: str) -> str | None:
             timeout=20,
         )
         if res.status_code != 200:
-            print(f"⚠️ Groq returned HTTP {res.status_code}")
+            _log_ai_error("Groq", res)
             return None
         data = res.json()
         answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
@@ -3327,7 +3337,7 @@ def _ai_chat_deepseek(system: str, user: str) -> str | None:
             timeout=20,
         )
         if res.status_code != 200:
-            print(f"⚠️ DeepSeek returned HTTP {res.status_code}")
+            _log_ai_error("DeepSeek", res)
             return None
         data = res.json()
         answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
@@ -3360,7 +3370,7 @@ def _ai_chat_mistral(system: str, user: str) -> str | None:
             timeout=20,
         )
         if res.status_code != 200:
-            print(f"⚠️ Mistral returned HTTP {res.status_code}")
+            _log_ai_error("Mistral", res)
             return None
         data = res.json()
         answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
@@ -3393,13 +3403,13 @@ def _ai_chat_perplexity(system: str, user: str) -> str | None:
             timeout=20,
         )
         if res.status_code != 200:
-            print(f"⚠️ Perplexity returned HTTP {res.status_code}")
+            _log_ai_error("OpenAI", res)
             return None
         data = res.json()
         answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
         return answer or None
     except Exception as exc:
-        print(f"⚠️ Perplexity failed: {type(exc).__name__}: {str(exc)[:160]}")
+        print(f"⚠️ OpenAI failed: {type(exc).__name__}: {str(exc)[:160]}")
         return None
 
 
@@ -3428,7 +3438,7 @@ def _ai_chat_openrouter(system: str, user: str) -> str | None:
             timeout=20,
         )
         if res.status_code != 200:
-            print(f"⚠️ OpenRouter returned HTTP {res.status_code}")
+            _log_ai_error("OpenRouter", res)
             return None
         data = res.json()
         answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
