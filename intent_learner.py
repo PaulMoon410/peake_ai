@@ -1,6 +1,8 @@
 
 from typing import Dict, List, Optional, Any
 
+# Constants imported from peakebot
+
 class IntentLearner:
     """Learns phrase-to-action mappings from conversation, applied linguistically.
 
@@ -19,7 +21,9 @@ class IntentLearner:
     def _load_intents(self) -> None:
         """Load existing intents from memory store."""
         try:
-            intents = self.store.get(_INTENT_CATEGORY, {})
+            from peakebot import _get_mcf_memory_store, _INTENT_CATEGORY, _ALLOWED_INTENT_TYPES, _MAX_INTENT_EXAMPLES_PER_TYPE
+            store = _get_mcf_memory_store()
+            intents = store.get(_INTENT_CATEGORY, {})
             for intent_type, examples in intents.items():
                 if intent_type in _ALLOWED_INTENT_TYPES:
                     self.intents[intent_type] = examples[:_MAX_INTENT_EXAMPLES_PER_TYPE]
@@ -41,7 +45,9 @@ class IntentLearner:
 
             # Save to memory store
             try:
-                self.store.set(_INTENT_CATEGORY, self.intents)
+                from peakebot import _get_mcf_memory_store, _INTENT_CATEGORY
+                store = _get_mcf_memory_store()
+                store.set(_INTENT_CATEGORY, self.intents)
                 return True
             except Exception as e:
                 print(f"⚠️ Failed to save intent: {e}")
@@ -62,7 +68,7 @@ class IntentLearner:
             for example in examples:
                 # Calculate match score
                 score = self._calculate_similarity(phrase, example)
-                if score > best_score and score >= _MIN_INTENT_MATCH_SCORE:
+                if score > best_score and score >= 0.4:
                     best_score = score
                     best_match = intent_type
 

@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import memory_store as memory_store_module
 from memory_store import MemoryLanguage, MemoryStore
 
 
@@ -64,6 +65,26 @@ class FakeFtp:
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_ftp_retrieve_discards_partial_passive_data_before_retry(self) -> None:
+        class PassiveFailFtp:
+            pasv = True
+
+            def set_pasv(self, flag: bool) -> None:
+                self.pasv = flag
+
+            def retrbinary(self, _command: str, callback) -> None:
+                if self.pasv:
+                    callback(b"partial")
+                    raise OSError("passive data channel refused")
+                callback(b"complete payload")
+
+        client = PassiveFailFtp()
+        chunks: list[bytes] = []
+        memory_store_module._ftp_retr_binary(client, "RETR notes.json", chunks.append)
+
+        self.assertFalse(client.pasv)
+        self.assertEqual(b"".join(chunks), b"complete payload")
+
     def test_uses_existing_render_ftp_environment_settings(self) -> None:
         env = {
             "FTP_HOST": "ftp.example.invalid",
@@ -327,11 +348,19 @@ Notes are stored in compact JSON Lines format.
                 store.upload(first)
                 store.upload(second)
                 remote_result = store.relevant_remote("Python coding")
+                # Two unrelated notes sharing one common word must NOT be
+                # presented as a relationship; that is how loose associations
+                # used to creep into answers.
+                self.assertNotIn("Ollama tooling", remote_result)
+                assert first is not None
+                store.link(second["i"], first["i"], "rel")
+                linked_result = store.relevant_remote("Python coding")
                 categories = store.remote_categories()
 
             self.assertIn("Python coding integration", remote_result)
-            self.assertIn("Ollama tooling", remote_result)
-            self.assertIn("RELATED", remote_result)
+            # An explicit link *is* a relationship and must be surfaced.
+            self.assertIn("Ollama tooling", linked_result)
+            self.assertIn("RELATED mesh rel", linked_result)
             self.assertEqual(["Projects/Agent", "Tools"], categories)
             self.assertEqual(1, len(store.records))
             self.assertEqual(1, len((Path(folder) / "memory.jsonl").read_text(encoding="utf-8").splitlines()))

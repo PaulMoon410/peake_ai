@@ -174,11 +174,36 @@ class NeuralLanguageModel:
         
         return corrected
     
+    def _fetch_word_data(self, word: str) -> tuple[list[str], list[str]]:
+        """Fetch meanings and synonyms for a word from the free Dictionary API.
+
+        Returns (meanings, synonyms). Network failures degrade gracefully.
+        """
+        try:
+            response = requests.get(
+                "https://api.dictionaryapi.dev/api/v2/entries/en/{}".format(word),
+                timeout=3,
+            )
+            if response.status_code != 200:
+                return [], []
+            data = response.json()[0]
+            meanings: list[str] = []
+            synonyms: list[str] = []
+            for meaning in data.get("meanings", []):
+                for definition in meaning.get("definitions", []):
+                    text = definition.get("definition", "")
+                    if text:
+                        meanings.append(text)
+                synonyms.extend(meaning.get("synonyms", []))
+            return meanings, synonyms
+        except Exception:
+            return [], []
+
     def load_dictionary_data(self):
-        """Load dictionary data from Free Dictionary API"""
+        """Load dictionary data from Free Dictionary API."""
         print("📚 Loading dictionary data...")
-        
-        # Common words to pre-load
+
+        # Common words to pre-load.
         common_words = [
             "hello", "world", "computer", "learn", "think", "understand",
             "intelligence", "artificial", "neural", "network", "language",
@@ -188,57 +213,105 @@ class NeuralLanguageModel:
             "human", "machine", "robot", "algorithm", "code", "program",
             "friend", "ally", "partner", "help", "assist", "support",
             "good", "great", "excellent", "amazing", "wonderful", "fantastic",
-            "question", "answer", "response", "conversation", "chat", "talk"
+            "question", "answer", "response", "conversation", "chat", "talk",
         ]
-        
+
         for word in common_words:
-            try:
-                response = requests.get(
-                    "https://api.dictionaryapi.dev/api/v2/entries/en/{}".format(word),
-                    timeout=3
-                )
-                if response.status_code == 200:
-                    data = response.json()[0]
-                    meanings = []
-                    synonyms = []
-                    
-                    for meaning in data.get('meanings', []):
-                        for definition in meaning.get('definitions', []):
-                            meanings.append(definition.get('definition', ''))
-                        synonyms.extend(meaning.get('synonyms', []))
-                    
-                    self.word_definitions[word] = meanings
-                    self.word_synonyms[word] = synonyms
-            except:
-                pass
-        
+            meanings, synonyms = self._fetch_word_data(word)
+            if meanings:
+                self.word_definitions[word] = meanings
+            if synonyms:
+                self.word_synonyms[word] = synonyms
+
         print("✅ Loaded {} word definitions".format(len(self.word_definitions)))
-    
-    def get_word_meaning(self, word):
-        """Get dictionary definition for a word"""
+
+    def get_word_meaning(self, word: str) -> str | None:
+        """Get dictionary definition for a word."""
         word = word.lower()
         if word in self.word_definitions:
             return self.word_definitions[word][0] if self.word_definitions[word] else None
-        
-        # Try to fetch from API
-        try:
-            response = requests.get(
-                "https://api.dictionaryapi.dev/api/v2/entries/en/{}".format(word),
-                timeout=2
-            )
-            if response.status_code == 200:
-                data = response.json()[0]
-                meanings = []
-                for meaning in data.get('meanings', []):
-                    for definition in meaning.get('definitions', []):
-                        meanings.append(definition.get('definition', ''))
-                
+
+        # Try to fetch from the free Dictionary API.
+        meanings, synonyms = self._fetch_word_data(word)
+        if meanings:
+            self.word_definitions[word] = meanings
+        if synonyms:
+            self.word_synonyms[word] = synonyms
+        return meanings[0] if meanings else None
+
+    def learn_word(self, word: str) -> dict:
+        """Learn a word from the free Dictionary API and grow the model's vocabulary.
+
+        The word and its synonyms are added to the vocabulary, embeddings, and
+        output weights so future generations can use them. Returns the fetched data.
+        """
+        word = (word or "").strip().lower()
+        if not word:
+            return {"word": "", "meanings": [], "synonyms": [], "added": 0}
+
+        meanings, synonyms = self._fetch_word_data(word)
+        added = 0
+
+        # Learn the word itself first.
+        if word not in self.vocab:
+            self._add_word_to_vocab(word)
+            added += 1
+            if meanings:
                 self.word_definitions[word] = meanings
-                return meanings[0] if meanings else None
-        except:
-            pass
-        
-        return None
+            if synonyms:
+                self.word_synonyms[word] = synonyms
+
+        # Learn each synonym as a reachable token too.
+        seen_synonyms = set(self.word_synonyms.get(word, []))
+        for syn in synonyms:
+            syn = syn.strip().lower()
+            if not syn or " " in syn or syn in seen_synonyms:
+                continue
+            seen_synonyms.add(syn)
+            if syn not in self.vocab:
+                self._add_word_to_vocab(syn)
+                added += 1
+
+        if synonyms:
+            self.word_synonyms[word] = sorted(seen_synonyms)
+
+        return {
+            "word": word,
+            "meanings": meanings,
+            "synonyms": sorted(seen_synonyms),
+            "added": added,
+        }
+
+    def _add_word_to_vocab(self, token: str) -> None:
+        """Add a single token to the vocabulary and grow weights accordingly."""
+        if self.vocab_size >= MAX_MODEL_VOCAB_SIZE:
+            return
+        self.vocab[token] = self.vocab_size
+        self.reverse_vocab[self.vocab_size] = token
+        self.vocab_size += 1
+
+        # Extend embeddings.
+        new_embedding = np.random.randn(1, self.embedding_dim) * 0.01
+        self.embeddings = np.vstack([self.embeddings, new_embedding])
+
+        # Extend output weights and bias.
+        new_weights = np.random.randn(self.hidden_dim, 1) * 0.01
+        self.W_output = np.hstack([self.W_output, new_weights])
+        new_bias = np.zeros((1, 1))
+        self.b_output = np.hstack([self.b_output, new_bias])
+
+    def expand_with_synonyms(self, text: str) -> str:
+        """Optionally replace tokens with learned synonyms for generation diversity."""
+        tokens = self.tokenize(text)
+        expanded = []
+        for token in tokens:
+            synonyms = self.word_synonyms.get(token)
+            if synonyms and len(token) > 3:
+                expanded.append(np.random.choice(synonyms))
+            else:
+                expanded.append(token)
+        return " ".join(expanded)
+
     
     def tokenize(self, text):
         """Convert text to tokens"""
@@ -468,11 +541,15 @@ class NeuralLanguageModel:
         
         return response
     
-    def learn_from_conversation(self, user_input, ai_response):
-        """Continue learning from conversations"""
+    def learn_from_conversation(self, user_input, ai_response, epochs=1):
+        """Continue learning from conversations.
+
+        ``epochs`` controls how many training passes run over the new pair so
+        high-quality interactions are retained more durably.
+        """
         texts = [user_input, ai_response]
-        
-        # Add new words to vocabulary if needed
+
+        # Add new words to vocabulary if needed.
         for text in texts:
             tokens = self.tokenize(text)
             for token in tokens:
@@ -482,19 +559,19 @@ class NeuralLanguageModel:
                     self.vocab[token] = self.vocab_size
                     self.reverse_vocab[self.vocab_size] = token
                     self.vocab_size += 1
-                    
-                    # Extend embeddings
+
+                    # Extend embeddings.
                     new_embedding = np.random.randn(1, self.embedding_dim) * 0.01
                     self.embeddings = np.vstack([self.embeddings, new_embedding])
-                    
-                    # Extend output weights
+
+                    # Extend output weights.
                     new_weights = np.random.randn(self.hidden_dim, 1) * 0.01
                     self.W_output = np.hstack([self.W_output, new_weights])
                     new_bias = np.zeros((1, 1))
                     self.b_output = np.hstack([self.b_output, new_bias])
-        
-        # Quick training on new data
-        self.train_on_text(texts, epochs=1)
+
+        # Quick training on new data.
+        self.train_on_text(texts, epochs=epochs)
     
     def save_model(self, filepath="language_model.npz"):
         """Save a versioned NumPy archive without executable pickle payloads."""

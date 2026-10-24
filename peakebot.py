@@ -256,13 +256,15 @@ _MODEL_TRAIN_LOCK = threading.Lock()
 _MODEL_INITIALIZE_LOCK = threading.Lock()
 _INTENT_LEARNER_LOCK = threading.Lock()
 model: NeuralLanguageModel | None = None
-intent_learner: IntentLearner | None = None
+intent_learner: "IntentLearner | None" = None
 
 # Intent learner constants
 _INTENT_CATEGORY = "Harold/Understanding/Intents"
 _ALLOWED_INTENT_TYPES = frozenset({"math", "remember", "search", "website", "recall_math", "recall_memory"})
 _MAX_INTENT_EXAMPLES_PER_TYPE = 24
 _MIN_INTENT_MATCH_SCORE = 0.4
+from intent_learner import IntentLearner
+
 # Entries are buffered until a batch is full, then handed to the upload worker.
 _FTP_PENDING_ENTRIES: list[dict] = []
 _FTP_PENDING_LOCK = threading.Lock()
@@ -336,7 +338,7 @@ def warm_language_model() -> None:
         print(f"⚠️ Own language model startup failed: {type(exc).__name__}: {str(exc)[:180]}", flush=True)
 
 
-def _get_intent_learner() -> IntentLearner:
+def _get_intent_learner() -> "IntentLearner":
     """Initialize the intent learner once, lazily, on first chat turn."""
     global intent_learner
     if intent_learner is not None:
