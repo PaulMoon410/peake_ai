@@ -54,6 +54,7 @@ FTP_USER = os.getenv("FTP_USER", "<REDACTED_FTP_USER>").strip()
 FTP_PASS = os.getenv("FTP_PASS", "<REDACTED_FTP_PASS>").strip()
 FTP_BASE_DIR = os.getenv("FTP_BASE_DIR", "<REDACTED_FTP_BASE_DIR>").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
@@ -2857,7 +2858,12 @@ def _recall_math_notes(query: str) -> str:
 
 
 def _save_explicit_mcf_memory(prompt: str) -> str | None:
-    """Save an explicit user memory request, refusing credentials and secrets."""
+    """Save an explicit user memory request, refusing credentials and secrets.
+
+    Also trains the neural model synchronously (hot-learning layer) and queues
+    the note for background online learning (consolidation layer) so the
+    knowledge compounds across chats and deploys.
+    """
     match = _EXPLICIT_MEMORY_RE.match(prompt.strip())
     if not match:
         return None
@@ -2874,11 +2880,24 @@ def _save_explicit_mcf_memory(prompt: str) -> str | None:
         if store.ftp_configured:
             try:
                 store.upload(record)
-                return "Got it—I saved that in the shared MCF3 knowledge store."
+                storage = "saved to shared MCF3/FTP memory"
             except Exception as exc:
                 print(f"⚠️ MCF3 FTP upload failed: {exc}")
-                return "Got it—I saved that in this instance's bounded cache, but the shared FTP upload failed."
-        return "Got it—I saved that in this instance's bounded cache. The shared FTP store is not connected."
+                storage = "saved locally (FTP upload failed)"
+        else:
+            storage = "saved locally (FTP not configured)"
+
+        # Hot-learning layer: synchronously adjust neural weights on the note.
+        try:
+            active_model = _get_language_model()
+            with _MODEL_TRAIN_LOCK:
+                active_model.learn_from_conversation(note, note, epochs=1)
+            # Long-term consolidation: queue for background online learning.
+            _queue_online_learning(note, note, source="note")
+        except Exception as exc:
+            print(f"⚠️ Neural training on note failed: {exc}")
+
+        return f"Got it—I saved that note {storage} and trained my model on it."
     except Exception as exc:
         print(f"⚠️ MCF3 memory save failed: {exc}")
         return "I couldn't save that note right now, but I can still use it in this conversation."
@@ -3163,7 +3182,11 @@ def _categorize_chat(prompt: str, response: str) -> str:
 
 
 def _store_ai_chat(prompt: str, response: str, provider: str) -> str:
-    """Categorize and save an AI chat interaction to MCF3 memory + FTP."""
+    """Categorize and save an AI chat interaction to MCF3 memory + FTP.
+
+    Also trains the neural model synchronously (hot-learning layer) and queues
+    the interaction for background online learning (consolidation layer).
+    """
     category = _categorize_chat(prompt, response)
     store = _get_mcf_memory_store()
     note = f"[{provider}] {response}"
@@ -3178,6 +3201,17 @@ def _store_ai_chat(prompt: str, response: str, provider: str) -> str:
             storage = "saved locally (FTP upload failed)"
     elif not getattr(store, "ftp_configured", False):
         storage = "saved locally (FTP not configured)"
+
+    # Hot-learning layer: train neural weights on the AI interaction.
+    try:
+        active_model = _get_language_model()
+        with _MODEL_TRAIN_LOCK:
+            active_model.learn_from_conversation(prompt, response, epochs=1)
+        # Long-term consolidation: queue for background online learning.
+        _queue_online_learning(prompt, response, source="ai_chat")
+    except Exception as exc:
+        print(f"⚠️ Neural training on AI chat failed: {exc}")
+
     return storage
 
 
@@ -3197,7 +3231,7 @@ def _ai_chat_openai(system: str, user: str) -> str | None:
         return None
     try:
         payload = {
-            "model": "gpt-3.5-turbo",
+            "model": OPENAI_MODEL,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},

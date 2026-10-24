@@ -475,6 +475,7 @@ class AIProviderTests(unittest.TestCase):
     def tearDown(self):
         for key, value in self._old_keys.items():
             setattr(peakebot, key, value)
+        peakebot.model = None
 
     def test_ai_chain_returns_none_without_any_keys(self):
         for key in self._old_keys:
