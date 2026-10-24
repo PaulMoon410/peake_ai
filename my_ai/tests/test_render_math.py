@@ -458,5 +458,44 @@ class WikipediaHandlerTests(unittest.TestCase):
         self.assertIsNone(peakebot._handle_wikipedia_request("what is 2 + 2"))
 
 
+class OpenAIFallbackTests(unittest.TestCase):
+    def setUp(self):
+        self._old_key = peakebot.OPENAI_API_KEY
+        peakebot.OPENAI_API_KEY = "sk-test1234567890abcdef"
+
+    def tearDown(self):
+        peakebot.OPENAI_API_KEY = self._old_key
+
+    def test_openai_fallback_returns_none_without_api_key(self):
+        peakebot.OPENAI_API_KEY = ""
+        self.assertIsNone(peakebot._openai_fallback("what is quantum computing?"))
+
+    def test_openai_fallback_calls_api_and_returns_answer(self):
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "choices": [
+                        {"message": {"content": "Quantum computing uses qubits."}}
+                    ]
+                }
+
+        with patch.object(peakebot.requests, "post", return_value=_Resp()):
+            answer = peakebot._openai_fallback("what is quantum computing?")
+        self.assertEqual(answer, "Quantum computing uses qubits.")
+
+    def test_openai_fallback_handles_non_200(self):
+        class _Resp:
+            status_code = 401
+
+        with patch.object(peakebot.requests, "post", return_value=_Resp()):
+            self.assertIsNone(peakebot._openai_fallback("what is quantum computing?"))
+
+    def test_openai_fallback_handles_network_error(self):
+        with patch.object(peakebot.requests, "post", side_effect=Exception("network down")):
+            self.assertIsNone(peakebot._openai_fallback("what is quantum computing?"))
+
+
 if __name__ == "__main__":
     unittest.main()

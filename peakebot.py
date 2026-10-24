@@ -53,6 +53,7 @@ FTP_HOST = os.getenv("FTP_HOST", "<REDACTED_FTP_HOST>").strip()
 FTP_USER = os.getenv("FTP_USER", "<REDACTED_FTP_USER>").strip()
 FTP_PASS = os.getenv("FTP_PASS", "<REDACTED_FTP_PASS>").strip()
 FTP_BASE_DIR = os.getenv("FTP_BASE_DIR", "<REDACTED_FTP_BASE_DIR>").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 FTP_UPLOAD_BATCH_SIZE = int(os.getenv("FTP_UPLOAD_BATCH_SIZE", "3"))
 # Upload work runs on a background worker so a chat turn never waits on FTP.
 # The queue is capped; if FTP is down the oldest batch is dropped rather than
@@ -2974,6 +2975,54 @@ def _search_web_verified_answer(query: str) -> str | None:
         return None
 
 
+def _openai_fallback(prompt: str, memory_context: str = "") -> str | None:
+    """Last-resort knowledge source: OpenAI chat completions.
+
+    Only used when the local neural model and all free web sources fail to
+    produce a confident answer. The response is saved to MCF3 memory (and FTP
+    when configured) so the knowledge persists across deploys.
+    """
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        system = (
+            "You are Harold, a helpful AI assistant. Answer concisely and "
+            "accurately. If you are unsure, say so. Do not invent facts."
+        )
+        user = prompt
+        if memory_context:
+            user = f"Relevant prior context: {memory_context}\n\nUser question: {prompt}"
+        payload = {
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.7,
+            "max_tokens": 400,
+        }
+        res = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if res.status_code != 200:
+            print(f"⚠️ OpenAI fallback returned HTTP {res.status_code}")
+            return None
+        data = res.json()
+        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if not answer:
+            return None
+        return answer
+    except Exception as exc:
+        print(f"⚠️ OpenAI fallback failed: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
+
 def generate_response(prompt, conversation_history=None):
     """Answer conversationally, recall MCF3 context, and synthesize web research when needed."""
     raw_prompt = (prompt or "").strip()
@@ -3114,6 +3163,31 @@ def generate_response(prompt, conversation_history=None):
             return response
 
     if not response or _response_seems_low_confidence(response):
+        # Last resort: OpenAI chat completions. Save anything it returns to
+        # MCF3 memory (and FTP when configured) so the knowledge persists.
+        openai_answer = _openai_fallback(raw_prompt, memory_context)
+        if openai_answer:
+            try:
+                store = _get_mcf_memory_store()
+                note = openai_answer
+                record = store.add(note, category="Knowledge/OpenAI", source="openai")
+                if record and getattr(store, "ftp_configured", False):
+                    try:
+                        store.upload(record)
+                        storage = "saved to shared MCF3/FTP memory"
+                    except Exception as exc:
+                        print(f"⚠️ OpenAI fallback FTP upload failed: {exc}")
+                        storage = "saved locally (FTP upload failed)"
+                else:
+                    storage = "saved locally (FTP not configured)"
+                remember(raw_prompt, openai_answer)
+                return (
+                    f"{openai_answer}\n\n(Answered via OpenAI fallback; {storage}.)"
+                )
+            except Exception as exc:
+                print(f"⚠️ OpenAI fallback memory save failed: {exc}")
+                remember(raw_prompt, openai_answer)
+                return openai_answer
         response = (
             "I’m not well informed on this yet. I tried to research it, but "
             "couldn’t find enough reliable information to give you a confident answer."

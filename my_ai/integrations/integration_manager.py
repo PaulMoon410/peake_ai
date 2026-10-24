@@ -1,8 +1,18 @@
 
 import os
 from typing import Dict, Any, Optional
-from .quickbooks import QuickBooksIntegration
-from .google_calendar import GoogleCalendarIntegration
+
+GoogleCalendarIntegration = None
+QuickBooksIntegration = None
+
+try:
+    from .quickbooks import QuickBooksIntegration  # type: ignore
+except Exception:
+    QuickBooksIntegration = None
+try:
+    from .google_calendar import GoogleCalendarIntegration  # type: ignore
+except Exception:
+    GoogleCalendarIntegration = None
 
 class IntegrationManager:
     """Central manager for all external integrations"""
