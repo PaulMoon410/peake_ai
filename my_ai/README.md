@@ -121,3 +121,17 @@ The Python assistant is being kept platform-aware, but the included llama.cpp ru
 ## Privacy and limits
 
 Chat and model inference run locally. `/search` sends the search words to DuckDuckGo; results are supplied to the local model for summarizing. When configured, FTP stores shared MCF3 notes remotely; Render retains only the bounded local cache. The assistant only creates website files in its `sites/` folder and does not run generated code. A 0.5B model can make mistakes, so review generated code and pages.
+
+
+## Read-only Hive bot status
+
+Pocket AI can ask the private Render market bot for a current, read-only status snapshot. It does not receive a Hive key and cannot control orders.
+
+Before starting Pocket AI, set:
+
+```sh
+export HIVE_BOT_STATUS_URL=https://YOUR-RENDER-SERVICE.onrender.com/ai/v1/status
+export HIVE_BOT_STATUS_TOKEN='the-token-configured-as-AI_STATUS_API_TOKEN-on-Render'
+```
+
+Then use `/hive-status` to summarize the latest snapshot, or `/hive-status your question` to ask about it. The status URL must use HTTPS. Keep the bearer token in environment settings and never commit it or paste it into chat. A missing or stale snapshot is reported as unavailable; the command does not submit any trading actions.
