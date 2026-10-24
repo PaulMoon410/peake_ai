@@ -4,6 +4,7 @@ import time
 import hmac
 from collections import defaultdict, deque
 from typing import Optional, Tuple
+from datetime import datetime, timedelta
 from flask import Flask, jsonify, request, Response
 from my_ai.conversation import normalize_history
 
@@ -17,9 +18,19 @@ from peakebot import (
   get_growth_snapshot,
   get_ftp_status,
   flush_sync_tasks,
+  startup_ftp_sync,
+  trading_advise,
+  trading_learn_mechanism,
+  trading_record_outcome,
+  trading_record_lesson,
+  trading_summary,
 )
+from my_ai.integrations.integration_manager import IntegrationManager
 
 app = Flask(__name__)
+
+# Initialize integration manager
+integration_manager = IntegrationManager()
 
 # Keep one generation at a time to avoid model state collisions.
 _GENERATION_LOCK = threading.Lock()
@@ -31,40 +42,73 @@ _REQUEST_LOG = defaultdict(deque)
 _ADMIN_RATE_WINDOW_SECONDS = 60
 _ADMIN_RATE_LIMIT_REQUESTS = 40
 _ADMIN_REQUEST_LOG = defaultdict(deque)
-_FTP_STARTUP_CHECK_LOCK = threading.Lock()
-_FTP_STARTUP_CHECK_STARTED = False
+_FTP_STARTUP_SYNC_LOCK = threading.Lock()
+_FTP_STARTUP_SYNC_STARTED = False
+_FTP_STARTUP_SYNC_DONE = threading.Event()
+_FTP_STARTUP_SYNC_RESULT: dict = {}
+_FTP_STARTUP_SYNC_TIMEOUT = float(os.getenv("FTP_STARTUP_SYNC_TIMEOUT", "25"))
+_FTP_STARTUP_SYNC_RETRY_SECONDS = int(os.getenv("FTP_STARTUP_SYNC_RETRY_SECONDS", "120"))
+_FTP_STARTUP_SYNC_MAX_ATTEMPTS = int(os.getenv("FTP_STARTUP_SYNC_MAX_ATTEMPTS", "10"))
 _MODEL_WARMUP_LOCK = threading.Lock()
 _MODEL_WARMUP_STARTED = False
 
 ADMIN_PANEL_ENABLED = os.getenv("ADMIN_PANEL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+# The trading bot runs on the operator's machine and calls this service.
+# It gets its own key so trading traffic can be rotated independently.
+TRADING_API_KEY = os.getenv("TRADING_API_KEY", "") or ADMIN_API_KEY
+_TRADING_RATE_WINDOW_SECONDS = 60
+_TRADING_RATE_LIMIT_REQUESTS = 120
+_TRADING_REQUEST_LOG = defaultdict(deque)
 
 
-def _start_ftp_startup_check() -> None:
-  """Run a non-blocking read-only FTP login/list check on the first request."""
-  global _FTP_STARTUP_CHECK_STARTED
-  with _FTP_STARTUP_CHECK_LOCK:
-    if _FTP_STARTUP_CHECK_STARTED:
+def _start_ftp_startup_sync() -> None:
+  """Archive local logs/notes to FTP in the background, retrying until it lands.
+
+  Render's disk is ephemeral, so a backlog that only exists locally is lost on
+  the next deploy. The first request waits (briefly) for this to finish so a
+  chat turn can never outrun the archive.
+  """
+  global _FTP_STARTUP_SYNC_STARTED
+  with _FTP_STARTUP_SYNC_LOCK:
+    if _FTP_STARTUP_SYNC_STARTED:
       return
-    _FTP_STARTUP_CHECK_STARTED = True
+    _FTP_STARTUP_SYNC_STARTED = True
 
-  def check() -> None:
+  def run() -> None:
+    global _FTP_STARTUP_SYNC_RESULT
+    backoff = _FTP_STARTUP_SYNC_RETRY_SECONDS
+    attempt = 0
     try:
       store = _get_mcf_memory_store()
-      if store.ftp_configured:
-        mode = "explicit FTPS" if store.ftp_tls else "plain FTP"
-        print(
-          f"[startup] MCF3 FTP probe: {store.ftp_host}:21 via {mode}; passive mode; "
-          "8s timeout. SFTP is not used. This probe checks login/listing only, not upload permission.",
-          flush=True,
-        )
-      ok, detail = store.verify_ftp(timeout=8.0)
-      state = "OK" if ok else ("NOT CONFIGURED" if detail == "not configured" else "FAILED")
-      print(f"[startup] MCF3 FTP {state}: {detail}", flush=True)
+      mode = "explicit FTPS" if store.ftp_tls else "plain FTP"
+      print(
+        f"[startup] MCF3 FTP archive: {store.ftp_host}:21 via {mode}; passive mode if possible. "
+        "SFTP is not used. This run uploads local session logs and notes and pulls "
+        "remote knowledge down, so it does test upload permission.",
+        flush=True,
+      )
     except Exception as exc:
-      print(f"[startup] MCF3 FTP check failed: {type(exc).__name__}", flush=True)
+      print(f"[startup] FTP transport probe skipped: {type(exc).__name__}", flush=True)
+    while True:
+      attempt += 1
+      try:
+        report = startup_ftp_sync()
+      except Exception as exc:
+        print(f"[startup] FTP sync raised {type(exc).__name__}: {exc}", flush=True)
+        report = {"ok": False, "errors": [f"{type(exc).__name__}: {exc}"]}
+      with _FTP_STARTUP_SYNC_LOCK:
+        _FTP_STARTUP_SYNC_RESULT = report
+      if attempt == 1:
+        _FTP_STARTUP_SYNC_DONE.set()
+      if report.get("ok") or attempt >= _FTP_STARTUP_SYNC_MAX_ATTEMPTS:
+        return
+      # FTP may not be reachable yet at boot; keep retrying with backoff.
+      print(f"[startup] FTP sync incomplete, retrying in {backoff}s.", flush=True)
+      time.sleep(backoff)
+      backoff = min(backoff * 2, 900)
 
-  threading.Thread(target=check, name="ftp-startup-check", daemon=True).start()
+  threading.Thread(target=run, name="ftp-startup-sync", daemon=True).start()
 
 
 def _start_model_warmup() -> None:
@@ -85,8 +129,11 @@ def _start_model_warmup() -> None:
 @app.before_request
 def _kickoff_ftp_startup_check() -> None:
   # Gunicorn has bound the listener; keep readiness requests fast during warm-up.
-  _start_ftp_startup_check()
+  _start_ftp_startup_sync()
   _start_model_warmup()
+  if request.path != "/health":
+    # Let the archive finish before handling real traffic.
+    _FTP_STARTUP_SYNC_DONE.wait(timeout=_FTP_STARTUP_SYNC_TIMEOUT)
 
 
 def _check_rate_limit(client_ip: str) -> bool:
@@ -677,6 +724,24 @@ def admin_flush_sync() -> Response:
     return jsonify({"ok": True, "message": "sync tasks flushed"})
 
 
+@app.post("/api/admin/archive-sync")
+def admin_archive_sync() -> Response:
+    """Force an archive sync: push local session logs/notes to FTP and pull knowledge down."""
+    ok, error = _admin_enabled_and_configured()
+    if not ok:
+        return error, 503
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_admin_rate_limit(client_ip):
+        return jsonify({"error": "admin rate limit exceeded"}), 429
+    if not _is_admin_authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        report = startup_ftp_sync()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": bool(report.get("ok")), "report": report})
+
+
 @app.get("/api/admin/ftp-status")
 def admin_ftp_status() -> Response:
     ok, error = _admin_enabled_and_configured()
@@ -710,6 +775,189 @@ def api_chat() -> Response:
         return jsonify({"error": f"generation failed: {exc}"}), 500
 
     return jsonify({"response": response})
+
+
+# -- trading bridge endpoints ----------------------------------------------
+# The trading bot runs locally and calls these over HTTP to ask Harold for
+# guidance and to report outcomes back so Harold can learn what works.
+
+
+def _is_trading_authorized(req) -> bool:
+    incoming = (
+        req.headers.get("X-Trading-Key", "")
+        or req.headers.get("X-Admin-Key", "")
+        or ""
+    ).strip()
+    if not incoming or not TRADING_API_KEY:
+        return False
+    return hmac.compare_digest(incoming, TRADING_API_KEY)
+
+
+def _check_trading_rate_limit(client_ip: str) -> bool:
+    now = time.time()
+    window_start = now - _TRADING_RATE_WINDOW_SECONDS
+    log = _TRADING_REQUEST_LOG[client_ip]
+    while log and log[0] < window_start:
+        log.popleft()
+    if len(log) >= _TRADING_RATE_LIMIT_REQUESTS:
+        return False
+    log.append(now)
+    return True
+
+
+def _trading_guard(req):
+    """Return an error Response when the caller is not allowed, else None."""
+    if not TRADING_API_KEY:
+        return jsonify({"error": "TRADING_API_KEY is not configured"}), 503
+    if not _is_trading_authorized(req):
+        return jsonify({"error": "unauthorized"}), 401
+    client_ip = req.headers.get("X-Forwarded-For", req.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_trading_rate_limit(client_ip):
+        return jsonify({"error": "rate limit exceeded; try again shortly"}), 429
+    return None
+
+
+@app.post("/api/trading/advise")
+def api_trading_advise() -> Response:
+    guard = _trading_guard(request)
+    if guard is not None:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    context = payload.get("context") or {}
+    if not isinstance(context, dict):
+        return jsonify({"error": "context must be an object"}), 400
+    question = str(payload.get("question", "")).strip()
+    try:
+        result = trading_advise(context, question)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"trading advice failed: {exc}"}), 500
+    return jsonify(result)
+
+
+@app.post("/api/trading/feedback")
+def api_trading_feedback() -> Response:
+    guard = _trading_guard(request)
+    if guard is not None:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    key = str(payload.get("key", "")).strip()
+    if not key:
+        return jsonify({"error": "key is required"}), 400
+    try:
+        pnl = float(payload.get("pnl", 0) or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "pnl must be a number"}), 400
+    try:
+        if payload.get("lesson"):
+            result = trading_record_lesson(
+                key, str(payload["lesson"]),
+                market=str(payload.get("market", "")),
+                timeframe=str(payload.get("timeframe", "")),
+            )
+        else:
+            result = trading_record_outcome(
+                key, str(payload.get("outcome", "")),
+                market=str(payload.get("market", "")),
+                timeframe=str(payload.get("timeframe", "")),
+                pnl=pnl,
+                notes=str(payload.get("notes", "")),
+            )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"trading feedback failed: {exc}"}), 500
+    return jsonify(result)
+
+
+@app.post("/api/trading/mechanism")
+def api_trading_mechanism() -> Response:
+    guard = _trading_guard(request)
+    if guard is not None:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    key = str(payload.get("key", "")).strip()
+    description = str(payload.get("description", "")).strip()
+    tags = payload.get("tags") or []
+    if not isinstance(tags, list):
+        return jsonify({"error": "tags must be a list"}), 400
+    try:
+        result = trading_learn_mechanism(
+            key, description,
+            market=str(payload.get("market", "")),
+            timeframe=str(payload.get("timeframe", "")),
+            tags=[str(tag) for tag in tags],
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"mechanism learning failed: {exc}"}), 500
+    return jsonify(result)
+
+
+@app.get("/api/integrations/status")
+def api_integrations_status() -> Response:
+    """Get status of all integrations"""
+    try:
+        return jsonify(integration_manager.get_integration_status())
+    except Exception as exc:
+        return jsonify({"error": f"integration status check failed: {exc}"}), 500
+
+
+@app.get("/api/quickbooks/financial-summary")
+def api_quickbooks_summary() -> Response:
+    """Get financial summary from QuickBooks"""
+    days = request.args.get("days", 30, type=int)
+    try:
+        return jsonify(integration_manager.get_financial_summary(days))
+    except Exception as exc:
+        return jsonify({"error": f"QuickBooks summary failed: {exc}"}), 500
+
+
+@app.post("/api/calendar/find-time")
+def api_calendar_find_time() -> Response:
+    """Find available time in Google Calendar"""
+    payload = request.get_json(silent=True) or {}
+    duration = float(payload.get("duration_hours", 1.0))
+    search_days = int(payload.get("search_days", 7))
+    try:
+        return jsonify(integration_manager.find_meeting_time(duration, search_days))
+    except Exception as exc:
+        return jsonify({"error": f"Calendar time search failed: {exc}"}), 500
+
+
+@app.post("/api/calendar/create-event")
+def api_calendar_create_event() -> Response:
+    """Create a new calendar event"""
+    payload = request.get_json(silent=True) or {}
+    summary = str(payload.get("summary", "")).strip()
+    start_time = str(payload.get("start_time", "")).strip()
+    duration = float(payload.get("duration_hours", 1.0))
+    attendees = payload.get("attendees") or []
+    
+    if not summary:
+        return jsonify({"error": "summary is required"}), 400
+    if not start_time:
+        return jsonify({"error": "start_time is required"}), 400
+        
+    try:
+        return jsonify(integration_manager.schedule_business_meeting(
+            summary, start_time, duration, attendees
+        ))
+    except Exception as exc:
+        return jsonify({"error": f"Calendar event creation failed: {exc}"}), 500
+
+
+@app.get("/api/trading/summary")
+def api_trading_summary() -> Response:
+    guard = _trading_guard(request)
+    if guard is not None:
+        return guard
+    try:
+        return jsonify(trading_summary())
+    except Exception as exc:
+        return jsonify({"error": f"trading summary failed: {exc}"}), 500
 
 
 if __name__ == "__main__":

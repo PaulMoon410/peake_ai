@@ -139,7 +139,7 @@ class RenderMathTests(unittest.TestCase):
 
         startup_source = (ROOT / "web_app.py").read_text(encoding="utf-8")
         self.assertIn("SFTP is not used", startup_source)
-        self.assertIn("not upload permission", startup_source)
+        self.assertIn("does test upload permission", startup_source)
 
     def test_render_chat_uses_the_bootstrapped_neural_model(self) -> None:
         fake_model = Mock()
@@ -357,6 +357,105 @@ class RenderMathTests(unittest.TestCase):
 
     def test_non_math_prompt_is_not_intercepted(self) -> None:
         self.assertIsNone(peakebot._handle_math_request("What is the capital of France?"))
+
+
+class DictionaryHandlerTests(unittest.TestCase):
+    def setUp(self):
+        self._fake_model = types.SimpleNamespace()
+        self._fake_model.word_definitions = {}
+        self._fake_model.word_synonyms = {}
+
+        def fake_get_meaning(word):
+            return self._fake_model.word_definitions.get(word.lower(), [None])[0]
+
+        def fake_learn_word(word):
+            word = (word or "").strip().lower()
+            self._fake_model.word_definitions[word] = [f"definition of {word}"]
+            self._fake_model.word_synonyms[word] = ["synonym1", "synonym2"]
+            return {"word": word, "meanings": [f"definition of {word}"], "synonyms": ["synonym1", "synonym2"], "added": 1}
+
+        self._fake_model.get_word_meaning = fake_get_meaning
+        self._fake_model.learn_word = fake_learn_word
+        self._patcher = patch.object(peakebot, "_get_language_model", return_value=self._fake_model)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_define_word_returns_definition(self):
+        self._fake_model.word_definitions["happy"] = ["feeling or showing pleasure"]
+        self._fake_model.word_synonyms["happy"] = ["joyful", "cheerful"]
+        answer = peakebot._handle_dictionary_request("define happy")
+        self.assertIsNotNone(answer)
+        self.assertIn("happy", answer)
+        self.assertIn("feeling or showing pleasure", answer)
+        self.assertIn("joyful", answer)
+
+    def test_define_unknown_word(self):
+        answer = peakebot._handle_dictionary_request("define qwertyuiopasdfghjkl")
+        self.assertIsNotNone(answer)
+        self.assertIn("couldn't find a definition", answer)
+
+    def test_learn_word_adds_to_model(self):
+        answer = peakebot._handle_dictionary_request("learn word serendipity")
+        self.assertIsNotNone(answer)
+        self.assertIn("serendipity", answer)
+        self.assertIn("added", answer)
+        self.assertIn("serendipity", self._fake_model.word_definitions)
+
+    def test_dictionary_request_ignores_non_dictionary_prompts(self):
+        self.assertIsNone(peakebot._handle_dictionary_request("hello how are you"))
+        self.assertIsNone(peakebot._handle_dictionary_request("what is 2 + 2"))
+
+
+class WikipediaHandlerTests(unittest.TestCase):
+    def setUp(self):
+        self._fake_store = types.SimpleNamespace()
+        self._fake_store.ftp_configured = False
+        self._saved_record = None
+
+        def fake_add(note, category=None, source=""):
+            self._saved_record = note
+            return {"i": "rec-1", "note": note[:50], "category": category, "source": source}
+
+        self._fake_store.add = fake_add
+        self._fake_store.upload = lambda record: None
+
+        self._patcher_store = patch.object(peakebot, "_get_mcf_memory_store", return_value=self._fake_store)
+        self._patcher_store.start()
+
+        self._patcher_model = patch.object(peakebot, "_get_language_model", return_value=types.SimpleNamespace())
+        self._patcher_model.start()
+
+    def tearDown(self):
+        self._patcher_store.stop()
+        self._patcher_model.stop()
+
+    def test_wikipedia_learns_article_and_saves_to_memory(self):
+        fake_search = [{"title": "Quantum computing", "link": "https://en.wikipedia.org/wiki/Quantum_computing"}]
+        fake_article = "Quantum computing is an area of study focused on developing computer technology based on the principles of quantum theory. " * 20
+
+        with (
+            patch.object(peakebot, "_search_wikipedia", return_value=fake_search),
+            patch.object(peakebot, "_fetch_wikipedia_article", return_value=fake_article),
+        ):
+            answer = peakebot._handle_wikipedia_request("learn wikipedia quantum computing")
+
+        self.assertIsNotNone(answer)
+        self.assertIn("Quantum computing", answer)
+        self.assertIn("saved", answer.lower())
+        self.assertIsNotNone(self._saved_record)
+        self.assertIn("Quantum computing", self._saved_record[:200])
+
+    def test_wikipedia_unknown_topic(self):
+        with patch.object(peakebot, "_search_wikipedia", return_value=[]):
+            answer = peakebot._handle_wikipedia_request("learn wikipedia asdfghjklqwertyuiop")
+        self.assertIsNotNone(answer)
+        self.assertIn("couldn't find", answer.lower())
+
+    def test_wikipedia_ignores_non_wikipedia_prompts(self):
+        self.assertIsNone(peakebot._handle_wikipedia_request("hello how are you"))
+        self.assertIsNone(peakebot._handle_wikipedia_request("what is 2 + 2"))
 
 
 if __name__ == "__main__":
