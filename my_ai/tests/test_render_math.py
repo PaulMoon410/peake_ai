@@ -458,43 +458,95 @@ class WikipediaHandlerTests(unittest.TestCase):
         self.assertIsNone(peakebot._handle_wikipedia_request("what is 2 + 2"))
 
 
-class OpenAIFallbackTests(unittest.TestCase):
+class AIProviderTests(unittest.TestCase):
     def setUp(self):
-        self._old_key = peakebot.OPENAI_API_KEY
+        self._old_keys = {
+            "OPENAI_API_KEY": peakebot.OPENAI_API_KEY,
+            "ANTHROPIC_API_KEY": peakebot.ANTHROPIC_API_KEY,
+            "GOOGLE_API_KEY": peakebot.GOOGLE_API_KEY,
+            "GROQ_API_KEY": peakebot.GROQ_API_KEY,
+            "DEEPSEEK_API_KEY": peakebot.DEEPSEEK_API_KEY,
+            "MISTRAL_API_KEY": peakebot.MISTRAL_API_KEY,
+            "PERPLEXITY_API_KEY": peakebot.PERPLEXITY_API_KEY,
+        }
         peakebot.OPENAI_API_KEY = "sk-test1234567890abcdef"
 
     def tearDown(self):
-        peakebot.OPENAI_API_KEY = self._old_key
+        for key, value in self._old_keys.items():
+            setattr(peakebot, key, value)
 
-    def test_openai_fallback_returns_none_without_api_key(self):
-        peakebot.OPENAI_API_KEY = ""
-        self.assertIsNone(peakebot._openai_fallback("what is quantum computing?"))
+    def test_ai_chain_returns_none_without_any_keys(self):
+        for key in self._old_keys:
+            setattr(peakebot, key, "")
+        answer, provider = peakebot._ai_chat_completion("what is quantum computing?")
+        self.assertIsNone(answer)
+        self.assertIsNone(provider)
 
-    def test_openai_fallback_calls_api_and_returns_answer(self):
+    def test_ai_chain_uses_openai_first(self):
         class _Resp:
             status_code = 200
 
             def json(self):
-                return {
-                    "choices": [
-                        {"message": {"content": "Quantum computing uses qubits."}}
-                    ]
-                }
+                return {"choices": [{"message": {"content": "OpenAI says hello"}}]}
 
         with patch.object(peakebot.requests, "post", return_value=_Resp()):
-            answer = peakebot._openai_fallback("what is quantum computing?")
-        self.assertEqual(answer, "Quantum computing uses qubits.")
+            answer, provider = peakebot._ai_chat_completion("what is quantum computing?")
+        self.assertEqual(answer, "OpenAI says hello")
+        self.assertEqual(provider, "openai")
 
-    def test_openai_fallback_handles_non_200(self):
+    def test_ai_chain_falls_back_to_anthropic_when_openai_fails(self):
+        peakebot.OPENAI_API_KEY = ""
+        peakebot.ANTHROPIC_API_KEY = "sk-ant-test123"
+
         class _Resp:
-            status_code = 401
+            status_code = 200
+
+            def json(self):
+                return {"content": [{"text": "Claude says hello"}]}
 
         with patch.object(peakebot.requests, "post", return_value=_Resp()):
-            self.assertIsNone(peakebot._openai_fallback("what is quantum computing?"))
+            answer, provider = peakebot._ai_chat_completion("what is quantum computing?")
+        self.assertEqual(answer, "Claude says hello")
+        self.assertEqual(provider, "anthropic")
 
-    def test_openai_fallback_handles_network_error(self):
+    def test_ai_chain_handles_network_error(self):
+        peakebot.OPENAI_API_KEY = ""
+        peakebot.ANTHROPIC_API_KEY = ""
         with patch.object(peakebot.requests, "post", side_effect=Exception("network down")):
-            self.assertIsNone(peakebot._openai_fallback("what is quantum computing?"))
+            answer, provider = peakebot._ai_chat_completion("what is quantum computing?")
+        self.assertIsNone(answer)
+        self.assertIsNone(provider)
+
+    def test_categorize_chat_returns_category(self):
+        category = peakebot._categorize_chat("how do I write a python function?", "Use def keyword.")
+        self.assertEqual(category, "programming")
+
+        category = peakebot._categorize_chat("what is 2+2?", "The answer is 4.")
+        self.assertEqual(category, "math")
+
+        category = peakebot._categorize_chat("tell me about world war 2", "It was a global war.")
+        self.assertEqual(category, "history")
+
+    def test_store_ai_chat_saves_and_uploads(self):
+        fake_store = types.SimpleNamespace()
+        fake_store.ftp_configured = True
+        saved = {}
+
+        def fake_add(note, category=None, source=""):
+            saved["note"] = note
+            saved["category"] = category
+            saved["source"] = source
+            return {"i": "rec-1"}
+
+        fake_store.add = fake_add
+        fake_store.upload = lambda record: None
+
+        with patch.object(peakebot, "_get_mcf_memory_store", return_value=fake_store):
+            storage = peakebot._store_ai_chat("what is python?", "Python is a programming language.", "openai")
+
+        self.assertIn("programming", saved["category"])
+        self.assertEqual(saved["source"], "ai:openai")
+        self.assertIn("FTP", storage)
 
 
 class GutenbergHandlerTests(unittest.TestCase):

@@ -54,6 +54,12 @@ FTP_USER = os.getenv("FTP_USER", "<REDACTED_FTP_USER>").strip()
 FTP_PASS = os.getenv("FTP_PASS", "<REDACTED_FTP_PASS>").strip()
 FTP_BASE_DIR = os.getenv("FTP_BASE_DIR", "<REDACTED_FTP_BASE_DIR>").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
+PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "").strip()
 FTP_UPLOAD_BATCH_SIZE = int(os.getenv("FTP_UPLOAD_BATCH_SIZE", "3"))
 # Upload work runs on a background worker so a chat turn never waits on FTP.
 # The queue is capped; if FTP is down the oldest batch is dropped rather than
@@ -3119,23 +3125,65 @@ def _search_web_verified_answer(query: str) -> str | None:
         return None
 
 
-def _openai_fallback(prompt: str, memory_context: str = "") -> str | None:
-    """Last-resort knowledge source: OpenAI chat completions.
+_AI_PROVIDERS = [
+    ("openai", "_ai_chat_openai"),
+    ("anthropic", "_ai_chat_anthropic"),
+    ("google", "_ai_chat_google"),
+    ("groq", "_ai_chat_groq"),
+    ("deepseek", "_ai_chat_deepseek"),
+    ("mistral", "_ai_chat_mistral"),
+    ("perplexity", "_ai_chat_perplexity"),
+]
 
-    Only used when the local neural model and all free web sources fail to
-    produce a confident answer. The response is saved to MCF3 memory (and FTP
-    when configured) so the knowledge persists across deploys.
-    """
+_CHAT_CATEGORY_KEYWORDS = {
+    "programming": ["code", "python", "javascript", "function", "variable", "api", "bug", "debug", "script", "class"],
+    "math": ["calculate", "equation", "algebra", "calculus", "geometry", "number", "arithmetic", "solve", "plus", "minus", "times", "divided", "equals", "sum", "answer", "2+2", "math"],
+    "science": ["physics", "chemistry", "biology", "quantum", "molecule", "atom", "experiment", "research"],
+    "history": ["war", "ancient", "century", "empire", "king", "queen", "revolution", "historical"],
+    "literature": ["book", "novel", "poem", "author", "shakespeare", "story", "novelist", "writing"],
+    "technology": ["computer", "internet", "software", "hardware", "robot", "ai", "digital", "tech"],
+    "philosophy": ["ethics", "morality", "existence", "truth", "knowledge", "wisdom", "meaning"],
+    "health": ["medicine", "doctor", "disease", "treatment", "health", "body", "medical", "patient"],
+}
+
+
+def _categorize_chat(prompt: str, response: str) -> str:
+    """Categorize a chat interaction by keyword matching for MCF3 organization."""
+    text = f"{prompt} {response}".lower()
+    best_category = "general"
+    best_score = 0
+    for category, keywords in _CHAT_CATEGORY_KEYWORDS.items():
+        score = sum(1 for k in keywords if k in text)
+        if score > best_score:
+            best_score = score
+            best_category = category
+    return best_category
+
+
+def _store_ai_chat(prompt: str, response: str, provider: str) -> str:
+    """Categorize and save an AI chat interaction to MCF3 memory + FTP."""
+    category = _categorize_chat(prompt, response)
+    store = _get_mcf_memory_store()
+    note = f"[{provider}] {response}"
+    record = store.add(note, category=f"Knowledge/AI/{category}", source=f"ai:{provider}")
+    storage = "saved locally"
+    if record and getattr(store, "ftp_configured", False):
+        try:
+            store.upload(record)
+            storage = "saved to shared MCF3/FTP memory"
+        except Exception as exc:
+            print(f"⚠️ AI chat FTP upload failed: {exc}")
+            storage = "saved locally (FTP upload failed)"
+    elif not getattr(store, "ftp_configured", False):
+        storage = "saved locally (FTP not configured)"
+    return storage
+
+
+def _ai_chat_openai(system: str, user: str) -> str | None:
+    """OpenAI chat completions — primary AI provider."""
     if not OPENAI_API_KEY:
         return None
     try:
-        system = (
-            "You are Harold, a helpful AI assistant. Answer concisely and "
-            "accurately. If you are unsure, say so. Do not invent facts."
-        )
-        user = prompt
-        if memory_context:
-            user = f"Relevant prior context: {memory_context}\n\nUser question: {prompt}"
         payload = {
             "model": "gpt-3.5-turbo",
             "messages": [
@@ -3155,16 +3203,227 @@ def _openai_fallback(prompt: str, memory_context: str = "") -> str | None:
             timeout=20,
         )
         if res.status_code != 200:
-            print(f"⚠️ OpenAI fallback returned HTTP {res.status_code}")
+            print(f"⚠️ OpenAI returned HTTP {res.status_code}")
             return None
         data = res.json()
         answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        if not answer:
-            return None
-        return answer
+        return answer or None
     except Exception as exc:
-        print(f"⚠️ OpenAI fallback failed: {type(exc).__name__}: {str(exc)[:160]}")
+        print(f"⚠️ OpenAI failed: {type(exc).__name__}: {str(exc)[:160]}")
         return None
+
+
+def _ai_chat_anthropic(system: str, user: str) -> str | None:
+    """Anthropic Claude — fallback AI provider."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    try:
+        res = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "claude-3-haiku-20240307",
+                "max_tokens": 400,
+                "system": system,
+                "messages": [{"role": "user", "content": user}],
+            },
+            timeout=20,
+        )
+        if res.status_code != 200:
+            print(f"⚠️ Anthropic returned HTTP {res.status_code}")
+            return None
+        data = res.json()
+        answer = data.get("content", [{}])[0].get("text", "").strip()
+        return answer or None
+    except Exception as exc:
+        print(f"⚠️ Anthropic failed: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
+
+def _ai_chat_google(system: str, user: str) -> str | None:
+    """Google Gemini — fallback AI provider."""
+    if not GOOGLE_API_KEY:
+        return None
+    try:
+        res = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GOOGLE_API_KEY}",
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [{"parts": [{"text": f"{system}\n\n{user}"}]}],
+                "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7},
+            },
+            timeout=20,
+        )
+        if res.status_code != 200:
+            print(f"⚠️ Google returned HTTP {res.status_code}")
+            return None
+        data = res.json()
+        answer = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+        return answer or None
+    except Exception as exc:
+        print(f"⚠️ Google failed: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
+
+def _ai_chat_groq(system: str, user: str) -> str | None:
+    """Groq — fallback AI provider (fast inference)."""
+    if not GROQ_API_KEY:
+        return None
+    try:
+        res = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "llama-3.1-8b-instant",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.7,
+                "max_tokens": 400,
+            },
+            timeout=20,
+        )
+        if res.status_code != 200:
+            print(f"⚠️ Groq returned HTTP {res.status_code}")
+            return None
+        data = res.json()
+        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        return answer or None
+    except Exception as exc:
+        print(f"⚠️ Groq failed: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
+
+def _ai_chat_deepseek(system: str, user: str) -> str | None:
+    """DeepSeek — fallback AI provider."""
+    if not DEEPSEEK_API_KEY:
+        return None
+    try:
+        res = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.7,
+                "max_tokens": 400,
+            },
+            timeout=20,
+        )
+        if res.status_code != 200:
+            print(f"⚠️ DeepSeek returned HTTP {res.status_code}")
+            return None
+        data = res.json()
+        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        return answer or None
+    except Exception as exc:
+        print(f"⚠️ DeepSeek failed: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
+
+def _ai_chat_mistral(system: str, user: str) -> str | None:
+    """Mistral — fallback AI provider."""
+    if not MISTRAL_API_KEY:
+        return None
+    try:
+        res = requests.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "mistral-small-latest",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.7,
+                "max_tokens": 400,
+            },
+            timeout=20,
+        )
+        if res.status_code != 200:
+            print(f"⚠️ Mistral returned HTTP {res.status_code}")
+            return None
+        data = res.json()
+        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        return answer or None
+    except Exception as exc:
+        print(f"⚠️ Mistral failed: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
+
+def _ai_chat_perplexity(system: str, user: str) -> str | None:
+    """Perplexity — fallback AI provider (search-augmented)."""
+    if not PERPLEXITY_API_KEY:
+        return None
+    try:
+        res = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={
+                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "sonar",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.7,
+                "max_tokens": 400,
+            },
+            timeout=20,
+        )
+        if res.status_code != 200:
+            print(f"⚠️ Perplexity returned HTTP {res.status_code}")
+            return None
+        data = res.json()
+        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        return answer or None
+    except Exception as exc:
+        print(f"⚠️ Perplexity failed: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
+
+def _ai_chat_completion(prompt: str, memory_context: str = "") -> tuple[str | None, str | None]:
+    """Try AI providers in order: OpenAI first, then fallbacks.
+
+    Returns (answer, provider_name) or (None, None).
+    """
+    system = (
+        "You are Harold, a helpful AI assistant. Answer concisely and "
+        "accurately. If you are unsure, say so. Do not invent facts."
+    )
+    user = prompt
+    if memory_context:
+        user = f"Relevant prior context: {memory_context}\n\nUser question: {prompt}"
+
+    for provider_name, func_name in _AI_PROVIDERS:
+        try:
+            func = globals()[func_name]
+            answer = func(system, user)
+            if answer:
+                return answer, provider_name
+        except Exception as exc:
+            print(f"⚠️ AI provider {provider_name} failed: {type(exc).__name__}: {str(exc)[:120]}")
+            continue
+    return None, None
 
 
 def generate_response(prompt, conversation_history=None):
@@ -3281,24 +3540,36 @@ def generate_response(prompt, conversation_history=None):
 
     user_prompt = build_conversation_prompt(raw_prompt, history, memory_context)
 
-    # Expand the prompt with learned synonyms so the model reaches tokens it
-    # wouldn't otherwise generate, giving responses more vocabulary range.
-    try:
-        active_model_for_synonyms = _get_language_model()
-        expanded_prompt = active_model_for_synonyms.expand_with_synonyms(user_prompt)
-    except Exception:
-        expanded_prompt = user_prompt
+    # PRIMARY: AI providers — OpenAI first, then fallbacks. Learn from every
+    # interaction: categorize and upload to MCF3/FTP memory so knowledge
+    # persists across deploys and compounds over time.
+    ai_answer, ai_provider = _ai_chat_completion(raw_prompt, memory_context)
+    if ai_answer:
+        storage = _store_ai_chat(raw_prompt, ai_answer, ai_provider)
+        ai_answer = ai_answer.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
+        remember(raw_prompt, ai_answer)
+        return f"{ai_answer}\n\n(Answered via {ai_provider}; {storage}.)"
 
+    # SUPPLEMENT: free web research if the user explicitly asked to search.
+    if web_trigger:
+        verified = research()
+        response = _answer_from_research(raw_prompt, verified.get("hits", []), history, memory_context)
+        if verified.get("hits"):
+            _get_intent_learner().learn_intent(raw_prompt, "search")
+        response = response.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
+        remember(raw_prompt, response)
+        return response
+
+    # LAST RESORT: local neural model (kept running even without AI keys).
     try:
         active_model = _get_language_model()
         with _MODEL_TRAIN_LOCK:
-            response = active_model.generate_response(expanded_prompt, max_length=120, temperature=0.7)
+            response = active_model.generate_response(user_prompt, max_length=120, temperature=0.7)
     except Exception as exc:
         print(f"⚠️ Model generation failed, using fallback logic: {exc}")
         response = ""
 
-    # If Harold says he is unsure, research synchronously and return the best
-    # results found without sending stored memory or research data to the model API.
+    # If Harold says he is unsure, research synchronously before giving up.
     if not web_trigger and _response_seems_low_confidence(response):
         verified = research()
         if verified.get("hits"):
@@ -3312,31 +3583,6 @@ def generate_response(prompt, conversation_history=None):
             return response
 
     if not response or _response_seems_low_confidence(response):
-        # Last resort: OpenAI chat completions. Save anything it returns to
-        # MCF3 memory (and FTP when configured) so the knowledge persists.
-        openai_answer = _openai_fallback(raw_prompt, memory_context)
-        if openai_answer:
-            try:
-                store = _get_mcf_memory_store()
-                note = openai_answer
-                record = store.add(note, category="Knowledge/OpenAI", source="openai")
-                if record and getattr(store, "ftp_configured", False):
-                    try:
-                        store.upload(record)
-                        storage = "saved to shared MCF3/FTP memory"
-                    except Exception as exc:
-                        print(f"⚠️ OpenAI fallback FTP upload failed: {exc}")
-                        storage = "saved locally (FTP upload failed)"
-                else:
-                    storage = "saved locally (FTP not configured)"
-                remember(raw_prompt, openai_answer)
-                return (
-                    f"{openai_answer}\n\n(Answered via OpenAI fallback; {storage}.)"
-                )
-            except Exception as exc:
-                print(f"⚠️ OpenAI fallback memory save failed: {exc}")
-                remember(raw_prompt, openai_answer)
-                return openai_answer
         response = (
             "I’m not well informed on this yet. I tried to research it, but "
             "couldn’t find enough reliable information to give you a confident answer."
