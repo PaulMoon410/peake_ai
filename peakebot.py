@@ -10,9 +10,14 @@ try:
 except Exception:
     from backports.zoneinfo import ZoneInfo
 from ftplib import FTP
+import ftplib
+import io
 import re
 import requests
 from language_model import NeuralLanguageModel, create_training_data
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from intent_learner import IntentLearner
 from my_ai.conversation import (
     build_conversation_prompt,
     build_research_prompt,
@@ -22,6 +27,7 @@ from my_ai.conversation import (
 )
 from my_ai.math_learner import MathLearner
 from my_ai.memory_store import MemoryStore
+from my_ai.trading_bridge import TradingBridge
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus, urlparse
 import tempfile
@@ -48,7 +54,13 @@ FTP_USER = os.getenv("FTP_USER", "<REDACTED_FTP_USER>").strip()
 FTP_PASS = os.getenv("FTP_PASS", "<REDACTED_FTP_PASS>").strip()
 FTP_BASE_DIR = os.getenv("FTP_BASE_DIR", "<REDACTED_FTP_BASE_DIR>").strip()
 FTP_UPLOAD_BATCH_SIZE = int(os.getenv("FTP_UPLOAD_BATCH_SIZE", "3"))
+# Upload work runs on a background worker so a chat turn never waits on FTP.
+# The queue is capped; if FTP is down the oldest batch is dropped rather than
+# growing without bound, and the startup archive sync recovers anything lost.
+FTP_UPLOAD_QUEUE_MAX_BATCHES = int(os.getenv("FTP_UPLOAD_QUEUE_MAX_BATCHES", "20"))
+FTP_UPLOAD_BACKLOG_MAX_ENTRIES = int(os.getenv("FTP_UPLOAD_BACKLOG_MAX_ENTRIES", "5000"))
 MODEL_FTP_TIMEOUT_SECONDS = 8
+_FTP_BLOCK_MAX_ATTEMPTS = int(os.getenv("FTP_BLOCK_MAX_ATTEMPTS", "3"))
 LEARNING_QUEUE_FILE = "learning_queue.json"
 LEARNED_TOPICS_FILE = "learned_topics.json"
 KNOWLEDGE_OVERRIDES_FILE = "base_knowledge_overrides.json"
@@ -245,7 +257,21 @@ _MODEL_INITIALIZE_LOCK = threading.Lock()
 _INTENT_LEARNER_LOCK = threading.Lock()
 model: NeuralLanguageModel | None = None
 intent_learner: IntentLearner | None = None
-_FTP_PENDING_ENTRIES = []
+
+# Intent learner constants
+_INTENT_CATEGORY = "Harold/Understanding/Intents"
+_ALLOWED_INTENT_TYPES = frozenset({"math", "remember", "search", "website", "recall_math", "recall_memory"})
+_MAX_INTENT_EXAMPLES_PER_TYPE = 24
+_MIN_INTENT_MATCH_SCORE = 0.4
+# Entries are buffered until a batch is full, then handed to the upload worker.
+_FTP_PENDING_ENTRIES: list[dict] = []
+_FTP_PENDING_LOCK = threading.Lock()
+_UPLOAD_QUEUE: queue_mod.Queue | None = None
+_UPLOAD_QUEUE_LOCK = threading.Lock()
+_UPLOAD_STATS_LOCK = threading.Lock()
+_UPLOAD_STATS = {"batches_uploaded": 0, "entries_uploaded": 0, "batches_failed": 0, "last_error": "", "last_success": None}
+_MEMORY_SYNC_STARTED = False
+_MEMORY_SYNC_LOCK = threading.Lock()
 
 
 def _initialize_language_model() -> NeuralLanguageModel:
@@ -333,6 +359,21 @@ def _entry_key(entry: dict) -> str:
         str(entry.get("prompt", "")),
         str(entry.get("response", "")),
     ])
+
+
+def _ftp_credentials_ready() -> tuple[bool, str]:
+    """Check the FTP settings hold real values rather than redacted placeholders.
+
+    The repository ships placeholder credentials, so an unconfigured deploy
+    would otherwise fail deep inside the FTP client with an opaque error.
+    """
+    problems: list[str] = []
+    for label, value in (("FTP_HOST", FTP_HOST), ("FTP_USER", FTP_USER), ("FTP_PASS", FTP_PASS)):
+        if not value:
+            problems.append(f"{label} is empty")
+        elif value.startswith("<REDACTED"):
+            problems.append(f"{label} is still the redacted placeholder")
+    return (not problems), "; ".join(problems)
 
 
 def _dedupe_entries(entries: list) -> list:
@@ -461,10 +502,10 @@ def _save_model_to_ftp(model) -> bool:
         ftp = FTP(timeout=MODEL_FTP_TIMEOUT_SECONDS)
         ftp.connect(FTP_HOST, timeout=MODEL_FTP_TIMEOUT_SECONDS)
         ftp.login(FTP_USER, FTP_PASS)
-        ftp.set_pasv(True)
-        _ensure_ftp_directory(ftp, FTP_BASE_DIR)
+        _ftp_use_passive(ftp)
+        _ensure_ftp_directory(ftp, _resolved_ftp_base_dir())
         with open(local_path, "rb") as f:
-            ftp.storbinary("STOR language_model_brain.npz", f)
+            _ftp_store_binary(ftp, "language_model_brain.npz", f)
         print(f"🧠 Safe model checkpoint saved to FTP ({os.path.getsize(local_path)} bytes).")
         return True
     except Exception as e:
@@ -495,8 +536,8 @@ def _load_model_from_ftp(model) -> bool:
         ftp = FTP(timeout=MODEL_FTP_TIMEOUT_SECONDS)
         ftp.connect(FTP_HOST, timeout=MODEL_FTP_TIMEOUT_SECONDS)
         ftp.login(FTP_USER, FTP_PASS)
-        ftp.set_pasv(True)
-        _ensure_ftp_directory(ftp, FTP_BASE_DIR)
+        _ftp_use_passive(ftp)
+        _ensure_ftp_directory(ftp, _resolved_ftp_base_dir())
         try:
             ftp.sendcmd("TYPE I")
             size = ftp.size("language_model_brain.npz")
@@ -514,7 +555,7 @@ def _load_model_from_ftp(model) -> bool:
                     raise ValueError("FTP model checkpoint exceeds the 64 MiB download limit.")
                 f.write(chunk)
 
-            ftp.retrbinary("RETR language_model_brain.npz", write_limited)
+            _ftp_retr_binary(ftp, "language_model_brain.npz", write_limited)
         loaded = model.load_model(local_path)
         if loaded:
             print(f"🧠 Safe model checkpoint loaded from FTP ({os.path.getsize(local_path)} bytes).")
@@ -635,10 +676,26 @@ def _flush_online_learning(force: bool = False):
     with _MODEL_TRAIN_LOCK:
         for sample in batch:
             try:
-                active_model.learn_from_conversation(sample.get("prompt", ""), sample.get("response", ""))
+                prompt_text = sample.get("prompt", "")
+                response_text = sample.get("response", "")
+                quality = float(sample.get("quality", 0.0) or 0.0)
+                # Train longer on higher-quality interactions so the model
+                # retains strong signal more durably.
+                epochs = 1 if quality < 0.8 else 2
+                active_model.learn_from_conversation(prompt_text, response_text, epochs=epochs)
                 learned += 1
             except Exception as e:
                 print(f"⚠️ Online learning sample skipped: {str(e)}")
+
+        # Also grow vocabulary from any queued learning topics via the free
+        # dictionary API, so the model learns new words even without a live chat.
+        topic_buffer = _load_json_file(LEARNED_TOPICS_FILE, {"topics": []})
+        topics = topic_buffer.get("topics", []) if isinstance(topic_buffer, dict) else []
+        for topic in topics[:8]:
+            try:
+                active_model.learn_word(str(topic))
+            except Exception as e:
+                print(f"⚠️ Topic vocabulary learn skipped for {topic!r}: {str(e)}")
 
         if learned > 0:
             try:
@@ -812,13 +869,48 @@ def get_growth_snapshot() -> dict:
     profile = _load_json_file(GROWTH_PROFILE_FILE, _default_growth_profile())
     buffer_data = _load_json_file(ONLINE_LEARNING_BUFFER_FILE, {"items": []})
     pending_learning = len(buffer_data.get("items", [])) if isinstance(buffer_data, dict) else 0
-    pending_ftp = len(_FTP_PENDING_ENTRIES)
-    return {
+    with _FTP_PENDING_LOCK:
+        pending_ftp = len(_FTP_PENDING_ENTRIES)
+    snapshot = {
         "growth_profile": profile,
         "pending_online_learning_items": pending_learning,
         "pending_ftp_uploads": pending_ftp,
         "ftp_batch_size": FTP_UPLOAD_BATCH_SIZE,
         "knowledge_override_count": len(_BASE_KNOWLEDGE_OVERRIDES),
+        "upload_queue": _upload_snapshot(),
+        "memory": _memory_snapshot(),
+    }
+    return snapshot
+
+
+def _upload_snapshot() -> dict:
+    """Report the upload worker so a stalled queue is visible, not guesswork."""
+    with _UPLOAD_STATS_LOCK:
+        stats = dict(_UPLOAD_STATS)
+    with _FTP_PENDING_LOCK:
+        pending = len(_FTP_PENDING_ENTRIES)
+    upload_queue = _UPLOAD_QUEUE
+    return {
+        **stats,
+        "pending_entries": pending,
+        "batches_queued": upload_queue.qsize() if upload_queue is not None else 0,
+    }
+
+
+def _memory_snapshot() -> dict:
+    """Report local cache, archive index, and mesh sizes without any FTP call."""
+    try:
+        store = _get_mcf_memory_store()
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    with store._lock:
+        archive_notes = len(store._remote_index) if store._remote_index else 0
+        archive_loaded = store._remote_index is not None
+    return {
+        "local_notes": len(store.records),
+        "archive_notes": archive_notes,
+        "archive_index_loaded": archive_loaded,
+        "mesh": store.mesh_stats(),
     }
 
 
@@ -836,6 +928,68 @@ def get_ftp_status() -> dict:
         "base_dir": FTP_BASE_DIR,
         "has_password": bool(FTP_PASS),
     }
+
+
+# -- trading bridge --------------------------------------------------------
+# Harold runs on Render; the trading bot runs on the operator's machine and
+# talks to this service over HTTP. The bot asks for guidance, reports what
+# actually happened, and Harold folds those results into its trading memory
+# so the next recommendation is grounded in measured outcomes.
+
+_TRADING_BRIDGE: TradingBridge | None = None
+_TRADING_BRIDGE_LOCK = threading.Lock()
+
+
+def get_trading_bridge() -> TradingBridge:
+    """Build the trading bridge over the shared MCF3 memory store."""
+    global _TRADING_BRIDGE
+    if _TRADING_BRIDGE is not None:
+        return _TRADING_BRIDGE
+    with _TRADING_BRIDGE_LOCK:
+        if _TRADING_BRIDGE is None:
+            _TRADING_BRIDGE = TradingBridge(_get_mcf_memory_store(), responder=generate_response)
+            print("📈 Trading bridge ready.", flush=True)
+        return _TRADING_BRIDGE
+
+
+def trading_advise(context: dict | None = None, question: str = "") -> dict:
+    """Answer a trading bot's question using learned mechanisms and outcomes."""
+    try:
+        bridge = get_trading_bridge()
+        advice = bridge.advise(context=context, question=question)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    except Exception as exc:
+        print(f"⚠️ Trading advice failed: {exc}")
+        return {"advice": "", "error": f"trading advice failed: {exc}", "mechanisms": []}
+    return advice.to_dict()
+
+
+def trading_learn_mechanism(
+    key: str, description: str, market: str = "", timeframe: str = "", tags: list[str] | None = None,
+) -> dict:
+    """Teach Harold a new trading mechanism."""
+    bridge = get_trading_bridge()
+    return bridge.learn_mechanism(key, description, market=market, timeframe=timeframe, tags=tags)
+
+
+def trading_record_outcome(
+    key: str, outcome: str, market: str = "", timeframe: str = "", pnl: float = 0.0, notes: str = "",
+) -> dict:
+    """Report a trading result so Harold learns which mechanisms actually work."""
+    bridge = get_trading_bridge()
+    return bridge.record_outcome(key, outcome, market=market, timeframe=timeframe, pnl=pnl, notes=notes)
+
+
+def trading_record_lesson(key: str, lesson: str, market: str = "", timeframe: str = "") -> dict:
+    """Store a distilled trading lesson attached to a mechanism."""
+    bridge = get_trading_bridge()
+    return bridge.record_lesson(key, lesson, market=market, timeframe=timeframe)
+
+
+def trading_summary() -> dict:
+    """A snapshot of the trading knowledge Harold has accumulated."""
+    return get_trading_bridge().summary()
 
 
 def set_ftp_config(host=None, user=None, password=None, base_dir=None, batch_size=None) -> dict:
@@ -887,8 +1041,21 @@ def set_ftp_config(host=None, user=None, password=None, base_dir=None, batch_siz
 
 
 def flush_sync_tasks():
+    """Flush buffered work and pull the archive index/mesh into RAM."""
     _flush_pending_ftp_uploads(force=True)
     _flush_online_learning(force=True)
+    if _ftp_model_credentials_configured():
+        try:
+            store = _get_mcf_memory_store()
+            store.warm()
+        except Exception as exc:
+            print(f"⚠️ Archive index refresh failed: {type(exc).__name__}: {str(exc)[:160]}")
+    # Consolidation is cheap, bounded work: refresh the understanding layer so
+    # it never goes stale against a changing archive.
+    try:
+        _get_mcf_memory_store().consolidate(limit=3)
+    except Exception as exc:
+        print(f"⚠️ Consolidation skipped: {type(exc).__name__}: {str(exc)[:160]}")
 
 
 def _match_basic_interaction(normalized_text: str) -> str:
@@ -1364,9 +1531,9 @@ def fetch_all_ftp_memory():
     try:
         ftp = FTP(FTP_HOST)
         ftp.login(FTP_USER, FTP_PASS)
-        ftp.set_pasv(True)
-        _ensure_ftp_directory(ftp, FTP_BASE_DIR)
-        
+        _ftp_use_passive(ftp)
+        _ensure_ftp_directory(ftp, _resolved_ftp_base_dir())
+
         all_entries = []
         files = []
         try:
@@ -1383,22 +1550,22 @@ def fetch_all_ftp_memory():
             try:
                 local_path = _tmp_path(grouped_file)
                 with open(local_path, "wb") as f:
-                    ftp.retrbinary(f"RETR {grouped_file}", f.write)
+                    _ftp_retr_binary(ftp, grouped_file, f.write)
                 with open(local_path, "r", encoding="utf-8") as f:
                     batch_data = json.load(f)
                     all_entries.extend(batch_data)
             except Exception:
                 continue
-        
+
         # Backward compatibility: legacy archive files.
         try:
             batch_files = sorted([f for f in files if f.startswith("memory_batch_") and f.endswith(".json")])
-            
+
             for batch_file in batch_files:
                 try:
                     local_path = _tmp_path(batch_file)
                     with open(local_path, "wb") as f:
-                        ftp.retrbinary(f"RETR {batch_file}", f.write)
+                        _ftp_retr_binary(ftp, batch_file, f.write)
                     with open(local_path, "r", encoding="utf-8") as f:
                         batch_data = json.load(f)
                         all_entries.extend(batch_data)
@@ -1406,12 +1573,12 @@ def fetch_all_ftp_memory():
                     continue
         except:
             pass
-        
+
         # Current working memory cache
         try:
             local_path = _tmp_path("memory.json")
             with open(local_path, "wb") as f:
-                ftp.retrbinary(f"RETR memory.json", f.write)
+                _ftp_retr_binary(ftp, "memory.json", f.write)
             with open(local_path, "r", encoding="utf-8") as f:
                 current_memory = json.load(f)
                 all_entries.extend(current_memory)
@@ -1733,6 +1900,36 @@ def _search_wikipedia(query: str, max_items: int = 3) -> list:
         print(f"⚠️ Wikipedia search failed: {str(e)}")
         return []
 
+
+def _fetch_wikipedia_article(title: str) -> str | None:
+    """Fetch the full plain-text extract of a Wikipedia article (free, no API key)."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        url = "https://en.wikipedia.org/w/api.php"
+        params = {
+            "action": "query",
+            "format": "json",
+            "prop": "extracts",
+            "explaintext": 1,
+            "exsectionformat": "plain",
+            "titles": title,
+            "exlimit": 1,
+        }
+        res = requests.get(url, params=params, headers=headers, timeout=10)
+        if res.status_code != 200:
+            return None
+        data = res.json()
+        pages = data.get("query", {}).get("pages", {})
+        for page in pages.values():
+            extract = page.get("extract", "")
+            if extract:
+                return extract[:6000]
+        return None
+    except Exception as e:
+        print(f"⚠️ Wikipedia article fetch failed for {title!r}: {str(e)}")
+        return None
+
+
 def _search_bing(query: str, max_items: int = 5) -> list:
     """Search Bing for additional cross-verification results."""
     try:
@@ -1899,21 +2096,93 @@ def search_web(query):
     verified = search_web_verified(query)
     return verified.get("text")
 
-def _flush_pending_ftp_uploads(force: bool = False):
-    global _FTP_PENDING_ENTRIES
-    if not _FTP_PENDING_ENTRIES:
-        return
-    if not force and len(_FTP_PENDING_ENTRIES) < max(1, FTP_UPLOAD_BATCH_SIZE):
-        return
+def _upload_worker() -> None:
+    """Upload batches handed over by the chat path, one FTP session per batch."""
+    while True:
+        batch = _UPLOAD_QUEUE.get()
+        try:
+            ok = save_to_geocities(batch)
+            with _UPLOAD_STATS_LOCK:
+                if ok:
+                    _UPLOAD_STATS["batches_uploaded"] += 1
+                    _UPLOAD_STATS["entries_uploaded"] += len(batch)
+                    _UPLOAD_STATS["last_success"] = datetime.now().isoformat()
+                else:
+                    _UPLOAD_STATS["batches_failed"] += 1
+                    _UPLOAD_STATS["last_error"] = "archive upload failed"
+            if not ok:
+                # Keep the batch so a transient FTP outage does not lose it.
+                _requeue_failed_batch(batch)
+        except Exception as exc:
+            with _UPLOAD_STATS_LOCK:
+                _UPLOAD_STATS["batches_failed"] += 1
+                _UPLOAD_STATS["last_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+            _requeue_failed_batch(batch)
+        finally:
+            _UPLOAD_QUEUE.task_done()
 
-    # Upload queued entries in one FTP session to reduce connection overhead.
-    queued = list(_FTP_PENDING_ENTRIES)
-    save_to_geocities(queued)
-    _FTP_PENDING_ENTRIES = []
+
+def _requeue_failed_batch(batch: list) -> None:
+    """Return a failed batch to the pending buffer, dropping the oldest if full."""
+    with _FTP_PENDING_LOCK:
+        _FTP_PENDING_ENTRIES[:0] = batch
+        overflow = len(_FTP_PENDING_ENTRIES) - FTP_UPLOAD_BACKLOG_MAX_ENTRIES
+        if overflow > 0:
+            del _FTP_PENDING_ENTRIES[:overflow]
+            print(
+                f"⚠️ FTP upload backlog exceeded {FTP_UPLOAD_BACKLOG_MAX_ENTRIES} entries; "
+                f"dropped the oldest {overflow}."
+            )
+
+
+def _get_upload_queue() -> queue_mod.Queue:
+    """Create the upload queue and start its worker exactly once."""
+    global _UPLOAD_QUEUE
+    if _UPLOAD_QUEUE is not None:
+        return _UPLOAD_QUEUE
+    with _UPLOAD_QUEUE_LOCK:
+        if _UPLOAD_QUEUE is None:
+            _UPLOAD_QUEUE = queue_mod.Queue(maxsize=max(1, FTP_UPLOAD_QUEUE_MAX_BATCHES))
+            threading.Thread(target=_upload_worker, name="peakebot-ftp-upload", daemon=True).start()
+        return _UPLOAD_QUEUE
+
+
+def _flush_pending_ftp_uploads(force: bool = False):
+    """Hand buffered entries to the upload worker without blocking the caller."""
+    if not _ftp_model_credentials_configured():
+        with _FTP_PENDING_LOCK:
+            dropped = len(_FTP_PENDING_ENTRIES)
+            _FTP_PENDING_ENTRIES.clear()
+        if dropped:
+            # Nothing can be uploaded, so say so once instead of growing forever.
+            print(f"⚠️ FTP is not configured; discarded {dropped} buffered memory entr(y/ies).")
+        return
+    with _FTP_PENDING_LOCK:
+        if not _FTP_PENDING_ENTRIES:
+            return
+        if not force and len(_FTP_PENDING_ENTRIES) < max(1, FTP_UPLOAD_BATCH_SIZE):
+            return
+        batch = list(_FTP_PENDING_ENTRIES)
+        _FTP_PENDING_ENTRIES.clear()
+
+    upload_queue = _get_upload_queue()
+    try:
+        upload_queue.put_nowait(batch)
+    except queue_mod.Full:
+        # Worker is behind or FTP is down: keep the entries for the next flush.
+        _requeue_failed_batch(batch)
+        print("⚠️ FTP upload queue is full; holding entries for the next flush.")
+
+
+def _session_log_write_path() -> str:
+    """Pick where new session entries are written, independent of the cwd."""
+    for path in _session_log_candidates():
+        if os.path.exists(path):
+            return path
+    return os.path.abspath(HISTORY_FILE)
 
 
 def remember(prompt, response):
-    global _FTP_PENDING_ENTRIES
     if _SENSITIVE_MEMORY_RE.search(f"{prompt} {response}"):
         print("🔒 Skipping conversation persistence because it may contain credential material.")
         return
@@ -1922,16 +2191,19 @@ def remember(prompt, response):
         "prompt": prompt,
         "response": response
     }
-    with open(HISTORY_FILE, "r") as f:
-        memory = json.load(f)
+    history_path = _session_log_write_path()
+    memory = _load_json_file(history_path, [])
+    if not isinstance(memory, list):
+        memory = []
     memory.append(entry)
-    with open(HISTORY_FILE, "w") as f:
+    with open(history_path, "w") as f:
         json.dump(memory[-50:], f, indent=2)
 
     # Online growth loop: collect quality interactions and periodically retrain/checkpoint.
     _queue_online_learning(prompt, response, source="conversation")
 
-    _FTP_PENDING_ENTRIES.append(entry)
+    with _FTP_PENDING_LOCK:
+        _FTP_PENDING_ENTRIES.append(entry)
     _flush_pending_ftp_uploads(force=False)
 
 
@@ -1969,15 +2241,53 @@ def _sync_mcf_ftp_config(store):
 
 
 def _retrieve_mcf_memory(query: str) -> str:
-    """Retrieve task-relevant MCF3 notes from FTP, with bounded local fallback."""
+    """Recall relevant memory, preferring the archive index and walking the mesh.
+
+    Order matters for both speed and completeness: the local cache answers
+    without any network call, the archive index is a single bounded download,
+    and the mesh traversal then adds connected notes the plain keyword search
+    would have missed.
+    """
     try:
         store = _get_mcf_memory_store()
+        local = store.relevant(query, limit=6, max_chars=1400)
+        archive = ""
         if store.ftp_configured:
-            return store.relevant_remote(query, limit=6, max_chars=1400)
-        return store.relevant(query, limit=6, max_chars=1400)
+            archive = store.relevant_remote(query, limit=6, max_chars=1400)
+        mesh = store.mesh_recall(query, limit=6, max_chars=1400)
+        combined: list[str] = []
+        seen_notes: set[str] = set()
+        for block in (local, archive, mesh):
+            for line in block.splitlines():
+                body = line.split("] ", 1)[-1].strip() if "] " in line else line.strip()
+                if not body or body.casefold() in seen_notes:
+                    continue
+                seen_notes.add(body.casefold())
+                combined.append(line)
+        return "\n".join(combined)
     except Exception as exc:
         print(f"⚠️ MCF3 memory recall unavailable: {exc}")
         return ""
+
+
+def warm_memory_index() -> None:
+    """Warm the archive index once per process so the first recall is fast.
+
+    Called from the startup sync, never from a chat request: a download that
+    fails here costs nothing, and a chat turn then only ever searches memory
+    that is already in RAM.
+    """
+    global _MEMORY_SYNC_STARTED
+    with _MEMORY_SYNC_LOCK:
+        if _MEMORY_SYNC_STARTED:
+            return
+        _MEMORY_SYNC_STARTED = True
+    try:
+        store = _get_mcf_memory_store()
+        if store.ftp_configured:
+            store.warm()
+    except Exception as exc:
+        print(f"⚠️ Memory index warm-up skipped: {type(exc).__name__}: {str(exc)[:160]}")
 
 
 _EXPLICIT_MEMORY_RE = re.compile(
@@ -2107,6 +2417,118 @@ def _handle_website_learning_request(prompt: str) -> str | None:
         return None
     url = match.group(1).rstrip(".,;!")
     return _learn_from_website_url(url)
+
+
+def _handle_dictionary_request(prompt: str) -> str | None:
+    """Handle explicit dictionary/learn-word requests from the free Dictionary API."""
+    text = prompt.strip()
+    pl = text.lower()
+
+    define_match = re.match(r"^(?:define|what is the meaning of|meaning of)\s+(.+?)\s*[.!]?$", pl, re.IGNORECASE)
+    if define_match:
+        word = define_match.group(1).strip().strip('"\'')
+        if len(word) < 2 or len(word) > 40:
+            return "Give me a single word between 2 and 40 characters to define."
+        model = _get_language_model()
+        definition = model.get_word_meaning(word)
+        if definition:
+            synonyms = model.word_synonyms.get(word, [])
+            syn_text = f" Synonyms: {', '.join(synonyms[:8])}" if synonyms else ""
+            return f"The word '{word}' means: {definition}{syn_text}"
+        return f"I couldn't find a definition for '{word}' in the free dictionary. Try another word."
+
+    learn_match = re.match(r"^(?:learn|teach|learn word|add word)\s+(?:the\s+)?word\s+(.+?)\s*[.!]?$", pl, re.IGNORECASE)
+    if not learn_match:
+        learn_match = re.match(r"^learn word\s+(.+?)\s*[.!]?$", pl, re.IGNORECASE)
+    if learn_match:
+        word = learn_match.group(1).strip().strip('"\'')
+        if len(word) < 2 or len(word) > 40:
+            return "Give me a single word between 2 and 40 characters to learn."
+        model = _get_language_model()
+        result = model.learn_word(word)
+        if result["added"] > 0:
+            syn_text = f" ({result['synonyms'][:6]})" if result["synonyms"] else ""
+            return f"I learned '{word}' and added {result['added']} new token(s){syn_text} to my vocabulary."
+        if result["meanings"]:
+            return f"'{word}' is already in my vocabulary: {result['meanings'][0]}"
+        return f"I couldn't add '{word}' — the free dictionary didn't return anything for it."
+
+    return None
+
+
+def _handle_wikipedia_request(prompt: str) -> str | None:
+    """Handle 'learn wikipedia <topic>' requests using the free Wikipedia API.
+
+    Fetches the full article extract (not just a snippet), saves it to MCF3
+    memory so the bot can recall it later, and teaches the model key words.
+    """
+    text = prompt.strip()
+    pl = text.lower()
+
+    wiki_match = re.match(r"^(?:learn\s+wikipedia|wikipedia)\s+(.+?)\s*[.!]?$", pl, re.IGNORECASE)
+    if not wiki_match:
+        return None
+
+    topic = wiki_match.group(1).strip().strip('"\'')
+    if len(topic) < 2 or len(topic) > 80:
+        return "Give me a Wikipedia topic between 2 and 80 characters to learn about."
+
+    try:
+        search_results = _search_wikipedia(topic, max_items=1)
+        if not search_results:
+            return f"I couldn't find a Wikipedia article about '{topic}'. Try a different topic."
+
+        title = search_results[0].get("title", "")
+        if not title:
+            return f"I couldn't find a Wikipedia article about '{topic}'. Try a different topic."
+
+        article = _fetch_wikipedia_article(title)
+        if not article:
+            return f"I found '{title}' on Wikipedia but couldn't fetch the full article right now."
+
+        # Save the full article to shared MCF3 memory for later recall.
+        store = _get_mcf_memory_store()
+        record = store.add(article, category="Knowledge/Wikipedia", source=f"wikipedia:{title}")
+        if record is None:
+            return f"I already have the Wikipedia article '{title}' in my memory."
+
+        if store.ftp_configured:
+            try:
+                store.upload(record)
+                storage = "and uploaded it to the shared FTP memory store."
+            except Exception as exc:
+                print(f"⚠️ Wikipedia FTP upload failed: {exc}")
+                storage = "but the shared FTP upload failed (saved locally)."
+        else:
+            storage = "(saved locally; shared FTP is not connected)"
+
+        # Teach the model the topic's key words from the free dictionary API.
+        model = _get_language_model()
+        words = [w.strip(".,!?:;\"'()[]{}") for w in re.findall(r"[a-zA-Z]{4,}", article.lower())]
+        taught = 0
+        seen = set()
+        for w in words:
+            if w in seen or len(w) < 4:
+                continue
+            seen.add(w)
+            try:
+                result = model.learn_word(w)
+                if result["added"] > 0:
+                    taught += 1
+                    if taught >= 10:
+                        break
+            except Exception:
+                pass
+
+        snippet = article[:220].replace("\n", " ")
+        return (
+            f"I learned about '{title}' from Wikipedia and saved the full article {storage} "
+            f"Also taught my model {taught} new word(s) from the article. "
+            f"Preview: {snippet}…"
+        )
+    except Exception as exc:
+        print(f"⚠️ Wikipedia learning failed: {exc}")
+        return f"I couldn't learn about '{topic}' from Wikipedia right now. Try again later."
 
 
 def _learn_from_sources(topic: str, urls: list[str]) -> str:
@@ -2570,6 +2992,16 @@ def generate_response(prompt, conversation_history=None):
         remember(raw_prompt, website_learning_response)
         return website_learning_response
 
+    dictionary_response = _handle_dictionary_request(raw_prompt)
+    if dictionary_response is not None:
+        remember(raw_prompt, dictionary_response)
+        return dictionary_response
+
+    wikipedia_response = _handle_wikipedia_request(raw_prompt)
+    if wikipedia_response is not None:
+        remember(raw_prompt, wikipedia_response)
+        return wikipedia_response
+
     math_response = _handle_math_request(raw_prompt)
     if math_response is not None:
         if math_response.startswith(("Verified arithmetic:", "Saved as an unverified math note:", "I already have")):
@@ -2649,10 +3081,18 @@ def generate_response(prompt, conversation_history=None):
 
     user_prompt = build_conversation_prompt(raw_prompt, history, memory_context)
 
+    # Expand the prompt with learned synonyms so the model reaches tokens it
+    # wouldn't otherwise generate, giving responses more vocabulary range.
+    try:
+        active_model_for_synonyms = _get_language_model()
+        expanded_prompt = active_model_for_synonyms.expand_with_synonyms(user_prompt)
+    except Exception:
+        expanded_prompt = user_prompt
+
     try:
         active_model = _get_language_model()
         with _MODEL_TRAIN_LOCK:
-            response = active_model.generate_response(user_prompt, max_length=120, temperature=0.7)
+            response = active_model.generate_response(expanded_prompt, max_length=120, temperature=0.7)
     except Exception as exc:
         print(f"⚠️ Model generation failed, using fallback logic: {exc}")
         response = ""
@@ -2697,27 +3137,28 @@ def post_to_hive(title, body):
     except Exception as e:
         print("❌ Failed to post to Hive:", str(e))
 
-def save_to_geocities(entries):
-    """Save one or more entries to GeoCities as daily JSON groups with part rollover."""
+def save_to_geocities(entries, day_str: str | None = None) -> bool:
+    """Save one or more entries to GeoCities as daily JSON groups with part rollover.
+
+    ``day_str`` pins the target daily group (``YYYYMMDD``) so backfilled
+    history keeps its original date instead of landing in today. Returns True
+    when the entries reached the server.
+    """
     try:
         if isinstance(entries, dict):
             entries = [entries]
         entries = [e for e in (entries or []) if isinstance(e, dict)]
         if not entries:
-            return
+            return True
 
-        ftp = FTP(FTP_HOST)
-        ftp.login(FTP_USER, FTP_PASS)
-        ftp.set_pasv(True)
-        _ensure_ftp_directory(ftp, FTP_BASE_DIR)
+        ftp = _ftp_connect_for_upload()
+        _ensure_ftp_directory(ftp, _resolved_ftp_base_dir())
 
-        files = []
-        try:
-            files = ftp.nlst()
-        except Exception:
-            files = []
+        # Do not treat a failed directory listing as an empty archive: the
+        # first STOR below could otherwise replace an existing day's history.
+        files = ftp.nlst()
 
-        day_str = datetime.now().strftime("%Y%m%d")
+        day_str = day_str or datetime.now().strftime("%Y%m%d")
         day_parts = _find_daily_knowledge_parts(files, day_str)
 
         # Load latest daily part if present, otherwise start part 1.
@@ -2726,11 +3167,17 @@ def save_to_geocities(entries):
             local_group_path = _tmp_path(current_filename)
             try:
                 with open(local_group_path, "wb") as f:
-                    ftp.retrbinary(f"RETR {current_filename}", f.write)
+                    _ftp_retr_binary(ftp, current_filename, f.write)
                 with open(local_group_path, "r", encoding="utf-8") as f:
                     group_entries = json.load(f)
-            except Exception:
-                group_entries = []
+                if not isinstance(group_entries, list) or any(
+                    not isinstance(entry, dict) for entry in group_entries
+                ):
+                    raise ValueError(f"Invalid archive contents in {current_filename}")
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Refusing to overwrite unreadable archive {current_filename}"
+                ) from exc
         else:
             current_part_num = 1
             current_filename = f"{KNOWLEDGE_GROUP_PREFIX}_{day_str}_part{current_part_num}.json"
@@ -2753,20 +3200,26 @@ def save_to_geocities(entries):
             f.write(candidate_bytes)
 
         with open(local_group_path, "rb") as file:
-            ftp.storbinary(f"STOR {current_filename}", file)
+            payload = file.read()
+        _ftp_store_knowledge_group(ftp, current_filename, payload)
 
         print(f"📦 Saved to {current_filename} ({len(candidate_bytes) / (1024 * 1024):.2f} MB)")
-        
+
         # Update rolling working-memory cache for fast reads and webpage output.
         memory = []
-        try:
+        if "memory.json" in files:
             local_path = _tmp_path("memory.json")
-            with open(local_path, "wb") as f:
-                ftp.retrbinary(f"RETR memory.json", f.write)
-            with open(local_path, "r", encoding="utf-8") as f:
-                memory = json.load(f)
-        except:
-            memory = []
+            try:
+                with open(local_path, "wb") as f:
+                    _ftp_retr_binary(ftp, "memory.json", f.write)
+                with open(local_path, "r", encoding="utf-8") as f:
+                    memory = json.load(f)
+                if not isinstance(memory, list) or any(
+                    not isinstance(entry, dict) for entry in memory
+                ):
+                    raise ValueError("Invalid memory.json contents")
+            except Exception as exc:
+                raise RuntimeError("Refusing to overwrite unreadable memory.json") from exc
         
         memory.extend(entries)
         memory = _dedupe_entries(memory)[-WORKING_MEMORY_MAX_ENTRIES:]
@@ -2775,16 +3228,290 @@ def save_to_geocities(entries):
         with open(local_path, "w", encoding="utf-8") as f:
             json.dump(memory, f, indent=2)
         
+        # memory.json is rewritten whole each time, so a single store is
+        # cheaper than splitting it into appended blocks.
         with open(local_path, "rb") as file:
-            ftp.storbinary("STOR memory.json", file)
+            _ftp_store_binary(ftp, "memory.json", file)
 
         # Update HTML journal in same FTP session to avoid a second login per interaction.
         _generate_webpage_via_ftp(memory[-50:], ftp)
         
         ftp.quit()
         print(f"📁 Memory saved to GeoCities (working memory: {len(memory)} entries)")
+        return True
     except Exception as e:
-        print("❌ FTP Upload failed:", str(e))
+        print(f"❌ FTP Upload failed: {type(e).__name__}: {e}")
+        return False
+
+
+def _resolved_ftp_base_dir() -> str:
+    """Return the configured base directory, treating a placeholder as root."""
+    if FTP_BASE_DIR and not FTP_BASE_DIR.startswith("<REDACTED"):
+        return FTP_BASE_DIR
+    return "/"
+
+
+def _ftp_use_passive(ftp: FTP) -> None:
+    """Prefer passive mode, which is the safe default behind NAT."""
+    try:
+        ftp.set_pasv(True)
+    except Exception:
+        pass
+
+
+def _ftp_store_binary(ftp: FTP, remote_name: str, data) -> None:
+    """Upload bytes, using passive mode when the server allows it.
+
+    Some servers advertise PASV but refuse the data channel. Fall back to an
+    active connection before giving up on the upload. Appending is never
+    retried, because a partial append would be duplicated by a second try.
+    """
+    try:
+        ftp.storbinary(f"STOR {remote_name}", data)
+    except ftplib.all_errors:
+        ftp.set_pasv(False)
+        try:
+            data.seek(0)
+        except Exception:
+            pass
+        ftp.storbinary(f"STOR {remote_name}", data)
+
+
+def _ftp_connect_for_upload(timeout: float = 20.0, attempts: int = 3) -> FTP:
+    """Connect, log in, and select the archive folder with bounded retries.
+
+    The old path dialled with no timeout at all, so one unresponsive server
+    could hang a chat turn indefinitely. Each attempt gets a fresh client.
+    """
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        ftp = FTP(timeout=timeout)
+        try:
+            ftp.connect(FTP_HOST, timeout=timeout)
+            ftp.login(FTP_USER, FTP_PASS)
+            _ftp_use_passive(ftp)
+            return ftp
+        except ftplib.error_perm:
+            try:
+                ftp.close()
+            except Exception:
+                pass
+            raise
+        except (OSError, EOFError, ftplib.error_temp, ftplib.error_reply) as exc:
+            last_error = exc
+            try:
+                ftp.close()
+            except Exception:
+                pass
+            if attempt + 1 < attempts:
+                time.sleep(min(8, 2 ** attempt))
+    raise RuntimeError(
+        f"FTP connect/login failed after {attempts} attempt(s): {type(last_error).__name__}"
+    ) from last_error
+
+
+def _ftp_store_knowledge_group(ftp: FTP, remote_name: str, payload: bytes, block_size: int = 256 * 1024) -> None:
+    """Store an archive file in bounded blocks, retrying the failed block only.
+
+    One large ``storbinary`` call means a single dropped data channel loses the
+    whole day's file and forces a full re-login to retry. Sending fixed-size
+    blocks lets a transient failure resume where it stopped instead of
+    restarting the upload.
+    """
+    total = len(payload)
+    if total <= block_size:
+        _ftp_store_binary(ftp, remote_name, io.BytesIO(payload))
+        return
+    mode = "STOR"
+    offset = 0
+    attempts = 0
+    while offset < total:
+        block = payload[offset:offset + block_size]
+        command = f"{mode} {remote_name}"
+        try:
+            ftp.storbinary(command, io.BytesIO(block))
+        except ftplib.all_errors as exc:
+            attempts += 1
+            if isinstance(exc, ftplib.error_perm) or attempts > _FTP_BLOCK_MAX_ATTEMPTS:
+                raise
+            try:
+                ftp.set_pasv(False)
+            except Exception:
+                pass
+            continue
+        attempts = 0
+        offset += len(block)
+        mode = "APPE"
+
+
+def _ftp_retr_binary(ftp: FTP, remote_name: str, callback) -> None:
+    """Download safely, retrying in active mode without replaying partial bytes."""
+    with tempfile.SpooledTemporaryFile(max_size=1024 * 1024) as downloaded:
+        try:
+            ftp.retrbinary(f"RETR {remote_name}", downloaded.write)
+        except ftplib.all_errors as exc:
+            if isinstance(exc, ftplib.error_perm):
+                # A permission reply (for example 550 missing file) is not a
+                # transport problem, so do not retry over another data channel.
+                raise
+            ftp.set_pasv(False)
+            downloaded.seek(0)
+            downloaded.truncate()
+            ftp.retrbinary(f"RETR {remote_name}", downloaded.write)
+
+        downloaded.seek(0)
+        while chunk := downloaded.read(64 * 1024):
+            callback(chunk)
+
+
+def _session_log_candidates() -> list[str]:
+    """Return every path a local session log may occupy, most specific first."""
+    candidates: list[str] = []
+    override = os.getenv("PEAKEBOT_HISTORY_FILE", "").strip()
+    if override:
+        candidates.append(override)
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(module_dir, "peakebot_memory.json"))
+    candidates.append(os.path.join(os.path.dirname(module_dir), "peakebot_memory.json"))
+    candidates.append(os.path.abspath(HISTORY_FILE))
+
+    unique: list[str] = []
+    for path in candidates:
+        if path and path not in unique:
+            unique.append(path)
+    return unique
+
+
+def _load_local_session_entries() -> list:
+    """Merge every local session log we can find into one deduplicated list."""
+    merged: list = []
+    for path in _session_log_candidates():
+        if not os.path.exists(path):
+            continue
+        data = _load_json_file(path, [])
+        if not isinstance(data, list):
+            continue
+        merged.extend(entry for entry in data if isinstance(entry, dict))
+    return _dedupe_entries(merged)
+
+
+def _remote_daily_entry_keys(day_str: str) -> set:
+    """Collect the entry keys already stored in a remote daily knowledge group."""
+    keys: set = set()
+    ftp: FTP | None = None
+    try:
+        ftp = FTP(FTP_HOST, timeout=15)
+        ftp.login(FTP_USER, FTP_PASS)
+        _ftp_use_passive(ftp)
+        _ensure_ftp_directory(ftp, _resolved_ftp_base_dir())
+        try:
+            files = ftp.nlst()
+        except Exception:
+            files = []
+        for _, filename in _find_daily_knowledge_parts(files, day_str):
+            local_path = _tmp_path(filename)
+            try:
+                with open(local_path, "wb") as f:
+                    _ftp_retr_binary(ftp, filename, f.write)
+                with open(local_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+            except Exception:
+                continue
+            if isinstance(loaded, list):
+                for entry in loaded:
+                    if isinstance(entry, dict):
+                        keys.add(_entry_key(entry))
+    except Exception as exc:
+        print(f"⚠️ Could not read remote knowledge group {day_str}: {type(exc).__name__}: {exc}")
+    finally:
+        if ftp is not None:
+            try:
+                ftp.quit()
+            except Exception:
+                try:
+                    ftp.close()
+                except Exception:
+                    pass
+    return keys
+
+
+def upload_missing_session_logs() -> dict:
+    """Archive local session logs and cached notes that are missing from FTP.
+
+    Render's disk is ephemeral, so anything that only exists locally is lost on
+    the next deploy. This pushes the backlog up and pulls remote knowledge down.
+    """
+    report = {
+        "ok": False,
+        "conversation_entries": 0,
+        "conversation_days": 0,
+        "notes_uploaded": 0,
+        "notes_pulled": 0,
+        "errors": [],
+    }
+
+    ready, problem = _ftp_credentials_ready()
+    if not ready:
+        report["errors"].append(f"FTP credentials not ready: {problem}")
+        print(f"⚠️ FTP sync skipped - {problem}", flush=True)
+        return report
+
+    # 1) Cached knowledge notes: pull remote knowledge down, push local notes up.
+    try:
+        store = _get_mcf_memory_store()
+        if store.ftp_configured:
+            pulled, uploaded = store.sync()
+            report["notes_pulled"] = pulled
+            report["notes_uploaded"] = uploaded
+            print(f"📤 Note sync: {uploaded} uploaded, {pulled} pulled down.", flush=True)
+        else:
+            report["errors"].append("MCF3 store has no FTP configuration")
+    except Exception as exc:
+        report["errors"].append(f"note sync failed: {type(exc).__name__}: {exc}")
+        print(f"⚠️ Note sync failed: {type(exc).__name__}: {exc}", flush=True)
+
+    # 2) Conversation logs, grouped by the day they were actually recorded.
+    by_day: dict[str, list] = {}
+    for entry in _load_local_session_entries():
+        stamp = str(entry.get("timestamp", ""))
+        day = stamp[:10].replace("-", "") if len(stamp) >= 10 else ""
+        if len(day) != 8 or not day.isdigit():
+            day = datetime.now().strftime("%Y%m%d")
+        by_day.setdefault(day, []).append(entry)
+
+    for day, day_entries in sorted(by_day.items()):
+        remote_keys = _remote_daily_entry_keys(day)
+        missing = [e for e in day_entries if _entry_key(e) not in remote_keys]
+        if not missing:
+            continue
+        if save_to_geocities(missing, day_str=day):
+            report["conversation_entries"] += len(missing)
+            report["conversation_days"] += 1
+            print(f"📤 Archived {len(missing)} session log entr(ies) to {day}.", flush=True)
+        else:
+            report["errors"].append(f"upload failed for day {day}")
+
+    report["ok"] = not report["errors"]
+    return report
+
+
+def startup_ftp_sync() -> dict:
+    """Run the full FTP archive sync on boot and from the admin panel."""
+    print("📡 Startup FTP sync: archiving local session logs and cached notes...", flush=True)
+    report = upload_missing_session_logs()
+    # Pull the archive index and mesh into RAM once, so the first chat turn
+    # searches local memory instead of waiting on FTP.
+    warm_memory_index()
+    if report["ok"]:
+        print(
+            f"✅ Startup FTP sync complete: {report['conversation_entries']} log entr(ies) across "
+            f"{report['conversation_days']} day(s), {report['notes_uploaded']} note(s) uploaded, "
+            f"{report['notes_pulled']} note(s) pulled down.",
+            flush=True,
+        )
+    else:
+        print(f"⚠️ Startup FTP sync finished with issues: {'; '.join(report['errors'])}", flush=True)
+    return report
 
 
 def _ensure_ftp_directory(ftp: FTP, target_dir: str):
@@ -2832,7 +3559,7 @@ def _generate_webpage_via_ftp(entries, ftp: FTP):
         f.write(html_content)
 
     with open(local_path, "rb") as file:
-        ftp.storbinary("STOR index.html", file)
+        _ftp_store_binary(ftp, "index.html", file)
     print("🌍 Updated Harold journal webpage on GeoCities.")
 
 def generate_webpage(entries):
@@ -2856,10 +3583,10 @@ def generate_webpage(entries):
     try:
         ftp = FTP(FTP_HOST)
         ftp.login(FTP_USER, FTP_PASS)
-        ftp.set_pasv(True)
-        ftp.cwd(FTP_BASE_DIR)
+        _ftp_use_passive(ftp)
+        ftp.cwd(_resolved_ftp_base_dir())
         with open(local_path, "rb") as file:
-            ftp.storbinary("STOR index.html", file)
+            _ftp_store_binary(ftp, "index.html", file)
         ftp.quit()
         print("🌍 Updated Harold journal webpage on GeoCities.")
     except Exception as e:

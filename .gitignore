@@ -32,7 +32,24 @@
 !web_app.py
 
 # Never include directories from this workspace.
+!my_ai/memory_store.py
+!my_ai/math_learner.py
+!my_ai/conversation.py
+!my_ai/trading_bridge.py
 */
+!my_ai/
+my_ai/*
+!my_ai/*.py
+!my_ai/integrations/
+my_ai/integrations/*
+!my_ai/integrations/*.py
+!my_ai/harold/
+my_ai/harold/*
+!my_ai/harold/*.py
+!my_ai/tests/
+my_ai/tests/*
+!my_ai/tests/*.py
+!intent_learner.py
 
 # Runtime/cache artifacts
 *.pyc
