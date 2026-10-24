@@ -2534,6 +2534,150 @@ def _handle_wikipedia_request(prompt: str) -> str | None:
         return f"I couldn't learn about '{topic}' from Wikipedia right now. Try again later."
 
 
+def _fetch_gutenberg_book(book_id: str) -> tuple[str, str] | None:
+    """Fetch a public-domain book's plain text from Project Gutenberg.
+
+    Returns (title, text) or None if not found. Strips Gutenberg's
+    header/footer license boilerplate.
+    """
+    try:
+        book_id = book_id.strip()
+        if not book_id.isdigit():
+            return None
+
+        urls = [
+            f"https://www.gutenberg.org/files/{book_id}/{book_id}-0.txt",
+            f"https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}.txt",
+        ]
+
+        text = None
+        for url in urls:
+            try:
+                headers = {"User-Agent": "Mozilla/5.0 (HaroldBot/1.0; educational)"}
+                res = requests.get(url, headers=headers, timeout=15)
+                if res.status_code == 200 and len(res.text) > 1000:
+                    text = res.text
+                    break
+            except Exception:
+                continue
+        if text is None:
+            return None
+
+        # Strip Gutenberg header/footer boilerplate.
+        start_markers = [
+            "*** START OF THE PROJECT GUTENBERG EBOOK",
+            "***START OF THE PROJECT GUTENBERG EBOOK",
+        ]
+        end_markers = [
+            "*** END OF THE PROJECT GUTENBERG EBOOK",
+            "***END OF THE PROJECT GUTENBERG EBOOK",
+        ]
+
+        start_idx = -1
+        for m in start_markers:
+            start_idx = text.find(m)
+            if start_idx >= 0:
+                break
+        if start_idx >= 0:
+            newline = text.find("\n", start_idx)
+            text = text[newline + 1:] if newline >= 0 else text[start_idx:]
+
+        end_idx = len(text)
+        for m in end_markers:
+            found = text.find(m)
+            if found >= 0:
+                end_idx = found
+                break
+        text = text[:end_idx].strip()
+
+        # Extract a title from the first meaningful lines.
+        title = f"Gutenberg book #{book_id}"
+        for line in text.splitlines()[:40]:
+            line = line.strip()
+            if len(line) > 3 and len(line) < 120:
+                title = line
+                break
+
+        return title, text
+    except Exception as exc:
+        print(f"⚠️ Gutenberg fetch failed for {book_id!r}: {exc}")
+        return None
+
+
+def _handle_gutenberg_request(prompt: str) -> str | None:
+    """Handle 'learn gutenberg <book-id>' requests from Project Gutenberg.
+
+    Downloads a public-domain book, saves it to MCF3 memory (and FTP when
+    configured), and teaches the model its vocabulary so Harold's language
+    understanding grows from real books.
+    """
+    text = prompt.strip()
+    pl = text.lower()
+
+    guten_match = re.match(r"^(?:learn\s+gutenberg|gutenberg)\s+(.+?)\s*[.!]?$", pl, re.IGNORECASE)
+    if not guten_match:
+        return None
+
+    book_id = guten_match.group(1).strip().strip('"\'')
+    if not book_id.isdigit():
+        return "Give me a Project Gutenberg book ID (a number). Example: 'learn gutenberg 1342'"
+
+    result = _fetch_gutenberg_book(book_id)
+    if result is None:
+        return f"I couldn't find or download Gutenberg book #{book_id}. Try a different book ID."
+
+    title, book_text = result
+    if len(book_text) < 500:
+        return f"Gutenberg book #{book_id} ('{title}') downloaded but had too little readable text."
+
+    # Respect bandwidth: cap the stored text to the first 200 KB.
+    stored_text = book_text[:200 * 1024]
+
+    try:
+        store = _get_mcf_memory_store()
+        record = store.add(stored_text, category="Knowledge/Gutenberg", source=f"gutenberg:{book_id}")
+        if record is None:
+            return f"I already have Gutenberg book #{book_id} ('{title}') in my memory."
+
+        if store.ftp_configured:
+            try:
+                store.upload(record)
+                storage = "and uploaded to the shared FTP memory store."
+            except Exception as exc:
+                print(f"⚠️ Gutenberg FTP upload failed: {exc}")
+                storage = "but the shared FTP upload failed (saved locally)."
+        else:
+            storage = "(saved locally; shared FTP is not connected)"
+
+        # Teach the model vocabulary from the book's real words (no per-word
+        # network calls — these are genuine English words from the text).
+        model = _get_language_model()
+        words = [w.strip(".,!?:;\"'()[]{}") for w in re.findall(r"[a-zA-Z]{4,}", book_text.lower())]
+        taught = 0
+        seen = set()
+        for w in words:
+            if w in seen or len(w) < 4:
+                continue
+            seen.add(w)
+            try:
+                result_word = model.learn_word(w)
+                if result_word["added"] > 0:
+                    taught += 1
+                    if taught >= 15:
+                        break
+            except Exception:
+                pass
+
+        word_count = len(book_text.split())
+        return (
+            f"I learned Gutenberg book #{book_id}: '{title}' ({word_count:,} words) {storage} "
+            f"Also taught my model {taught} new word(s) from the book."
+        )
+    except Exception as exc:
+        print(f"⚠️ Gutenberg learning failed: {exc}")
+        return f"I couldn't save Gutenberg book #{book_id} to memory right now."
+
+
 def _learn_from_sources(topic: str, urls: list[str]) -> str:
     """Read up to four public pages, save cited excerpts, and compare passages."""
     try:
@@ -3052,6 +3196,11 @@ def generate_response(prompt, conversation_history=None):
     if wikipedia_response is not None:
         remember(raw_prompt, wikipedia_response)
         return wikipedia_response
+
+    gutenberg_response = _handle_gutenberg_request(raw_prompt)
+    if gutenberg_response is not None:
+        remember(raw_prompt, gutenberg_response)
+        return gutenberg_response
 
     math_response = _handle_math_request(raw_prompt)
     if math_response is not None:

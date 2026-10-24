@@ -497,5 +497,61 @@ class OpenAIFallbackTests(unittest.TestCase):
             self.assertIsNone(peakebot._openai_fallback("what is quantum computing?"))
 
 
+class GutenbergHandlerTests(unittest.TestCase):
+    def setUp(self):
+        self._fake_store = types.SimpleNamespace()
+        self._fake_store.ftp_configured = False
+        self._saved_record = None
+
+        def fake_add(note, category=None, source=""):
+            self._saved_record = note
+            return {"i": "rec-1", "note": note[:50], "category": category, "source": source}
+
+        self._fake_store.add = fake_add
+        self._fake_store.upload = lambda record: None
+
+        self._patcher_store = patch.object(peakebot, "_get_mcf_memory_store", return_value=self._fake_store)
+        self._patcher_store.start()
+
+        self._patcher_model = patch.object(peakebot, "_get_language_model", return_value=types.SimpleNamespace())
+        self._patcher_model.start()
+
+    def tearDown(self):
+        self._patcher_store.stop()
+        self._patcher_model.stop()
+
+    def test_gutenberg_learns_book_and_saves_to_memory(self):
+        fake_title = "Pride and Prejudice"
+        fake_text = (
+            "Pride and Prejudice\n\n"
+            "It is a truth universally acknowledged, that a single man in possession "
+            "of a good fortune, must be in want of a wife. " * 50
+        )
+
+        with patch.object(peakebot, "_fetch_gutenberg_book", return_value=(fake_title, fake_text)):
+            answer = peakebot._handle_gutenberg_request("learn gutenberg 1342")
+
+        self.assertIsNotNone(answer)
+        self.assertIn("Pride and Prejudice", answer)
+        self.assertIn("1342", answer)
+        self.assertIsNotNone(self._saved_record)
+        self.assertIn("Pride and Prejudice", self._saved_record[:200])
+
+    def test_gutenberg_invalid_id(self):
+        answer = peakebot._handle_gutenberg_request("learn gutenberg abc")
+        self.assertIsNotNone(answer)
+        self.assertIn("book ID", answer)
+
+    def test_gutenberg_not_found(self):
+        with patch.object(peakebot, "_fetch_gutenberg_book", return_value=None):
+            answer = peakebot._handle_gutenberg_request("learn gutenberg 999999999")
+        self.assertIsNotNone(answer)
+        self.assertIn("couldn't find", answer.lower())
+
+    def test_gutenberg_ignores_non_gutenberg_prompts(self):
+        self.assertIsNone(peakebot._handle_gutenberg_request("hello how are you"))
+        self.assertIsNone(peakebot._handle_gutenberg_request("what is 2 + 2"))
+
+
 if __name__ == "__main__":
     unittest.main()
