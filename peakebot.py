@@ -60,6 +60,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "").strip()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 FTP_UPLOAD_BATCH_SIZE = int(os.getenv("FTP_UPLOAD_BATCH_SIZE", "3"))
 # Upload work runs on a background worker so a chat turn never waits on FTP.
 # The queue is capped; if FTP is down the oldest batch is dropped rather than
@@ -3127,6 +3128,7 @@ def _search_web_verified_answer(query: str) -> str | None:
 
 _AI_PROVIDERS = [
     ("openai", "_ai_chat_openai"),
+    ("openrouter", "_ai_chat_openrouter"),
     ("anthropic", "_ai_chat_anthropic"),
     ("google", "_ai_chat_google"),
     ("groq", "_ai_chat_groq"),
@@ -3398,6 +3400,41 @@ def _ai_chat_perplexity(system: str, user: str) -> str | None:
         return answer or None
     except Exception as exc:
         print(f"⚠️ Perplexity failed: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
+
+def _ai_chat_openrouter(system: str, user: str) -> str | None:
+    """OpenRouter — aggregator giving access to many models via one key."""
+    if not OPENROUTER_API_KEY:
+        return None
+    try:
+        res = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://peakebot.ai",
+                "X-Title": "PeakeBot Harold",
+            },
+            json={
+                "model": "openrouter/auto",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.7,
+                "max_tokens": 400,
+            },
+            timeout=20,
+        )
+        if res.status_code != 200:
+            print(f"⚠️ OpenRouter returned HTTP {res.status_code}")
+            return None
+        data = res.json()
+        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        return answer or None
+    except Exception as exc:
+        print(f"⚠️ OpenRouter failed: {type(exc).__name__}: {str(exc)[:160]}")
         return None
 
 

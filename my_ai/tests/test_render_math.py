@@ -461,13 +461,14 @@ class WikipediaHandlerTests(unittest.TestCase):
 class AIProviderTests(unittest.TestCase):
     def setUp(self):
         self._old_keys = {
-            "OPENAI_API_KEY": peakebot.OPENAI_API_KEY,
-            "ANTHROPIC_API_KEY": peakebot.ANTHROPIC_API_KEY,
-            "GOOGLE_API_KEY": peakebot.GOOGLE_API_KEY,
-            "GROQ_API_KEY": peakebot.GROQ_API_KEY,
-            "DEEPSEEK_API_KEY": peakebot.DEEPSEEK_API_KEY,
-            "MISTRAL_API_KEY": peakebot.MISTRAL_API_KEY,
-            "PERPLEXITY_API_KEY": peakebot.PERPLEXITY_API_KEY,
+        "OPENAI_API_KEY": peakebot.OPENAI_API_KEY,
+        "OPENROUTER_API_KEY": peakebot.OPENROUTER_API_KEY,
+        "ANTHROPIC_API_KEY": peakebot.ANTHROPIC_API_KEY,
+        "GOOGLE_API_KEY": peakebot.GOOGLE_API_KEY,
+        "GROQ_API_KEY": peakebot.GROQ_API_KEY,
+        "DEEPSEEK_API_KEY": peakebot.DEEPSEEK_API_KEY,
+        "MISTRAL_API_KEY": peakebot.MISTRAL_API_KEY,
+        "PERPLEXITY_API_KEY": peakebot.PERPLEXITY_API_KEY,
         }
         peakebot.OPENAI_API_KEY = "sk-test1234567890abcdef"
 
