@@ -777,13 +777,6 @@ def admin_ftp_status() -> Response:
 def api_chat() -> Response:
     if request.method == "OPTIONS":
         return jsonify({"ok": True})
-    # Optional API key for chat: when CHAT_API_KEY is set, callers must present
-    # it via X-Api-Key so different apps get separate rate limits and access
-    # control instead of sharing one public bucket.
-    if CHAT_API_KEY:
-        incoming = (request.headers.get("X-Api-Key", "") or "").strip()
-        if not incoming or not hmac.compare_digest(incoming, CHAT_API_KEY):
-            return jsonify({"error": "unauthorized"}), 401
 
     payload = request.get_json(silent=True) or {}
     prompt = str(payload.get("prompt", "")).strip()
