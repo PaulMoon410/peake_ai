@@ -76,7 +76,7 @@ GROQ_MODELS = [
 OPENROUTER_MODELS = [
     m.strip() for m in os.getenv(
         "OPENROUTER_MODELS",
-        "openrouter/free,nvidia/nemotron-3.5-lightning:free,google/gemma-4-26b-a4b-it:free,openrouter/auto",
+        "openrouter/free,meta-llama/llama-3.2-3b-instruct:free,nvidia/nemotron-3.5-lightning:free,google/gemma-4-26b-a4b-it:free,openrouter/auto",
     ).split(",") if m.strip()
 ]
 GOOGLE_MODELS = [

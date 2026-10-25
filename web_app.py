@@ -27,6 +27,7 @@ from peakebot import (
 )
 from my_ai.integrations.integration_manager import IntegrationManager
 from my_ai.memory_organizer import sync_and_organize, HttpRecallCoordinator
+from my_ai.daily_ecency_poster import start_daily_poster, post_daily_update
 
 app = Flask(__name__)
 
@@ -130,11 +131,25 @@ def _start_model_warmup() -> None:
   threading.Thread(target=warm, name="model-warmup", daemon=True).start()
 
 
+def _get_mcf_store_for_poster():
+  """Return the MCF memory store for the daily poster, or None if unavailable."""
+  try:
+    return _get_mcf_memory_store()
+  except Exception:
+    return None
+
+
+def _start_daily_ecency_poster() -> None:
+  """Start the daily Ecency/Hive community poster in the background."""
+  start_daily_poster(store_getter=_get_mcf_store_for_poster)
+
+
 @app.before_request
 def _kickoff_ftp_startup_check() -> None:
   # Gunicorn has bound the listener; keep readiness requests fast during warm-up.
   _start_ftp_startup_sync()
   _start_model_warmup()
+  _start_daily_ecency_poster()
   if request.path != "/health":
     # Let the archive finish before handling real traffic.
     _FTP_STARTUP_SYNC_DONE.wait(timeout=_FTP_STARTUP_SYNC_TIMEOUT)
@@ -778,6 +793,25 @@ def admin_organize_memory() -> Response:
         http = HttpRecallCoordinator()
         report = sync_and_organize(store, force=True, http=http)
         return jsonify({"ok": True, "report": report})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.post("/api/admin/post-daily-update")
+def admin_post_daily_update() -> Response:
+    """Force-post the daily Ecency/Hive community update on demand."""
+    ok, error = _admin_enabled_and_configured()
+    if not ok:
+        return error, 503
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_admin_rate_limit(client_ip):
+        return jsonify({"error": "admin rate limit exceeded"}), 429
+    if not _is_admin_authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        store = _get_mcf_memory_store()
+        result = post_daily_update(store)
+        return jsonify({"ok": bool(result.get("ok")), "result": result})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
