@@ -2375,8 +2375,8 @@ _HELP_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _WEATHER_REQUEST_RE = re.compile(
-    r"^(?:please\s+)?(?:what(?:'s| is)\s+the\s+weather\s+(?:in|at|for)|weather\s+(?:in|at|for)|"
-    r"temperature\s+(?:in|at|for)|forecast\s+(?:in|at|for))\s+(.+?)[.!?\s]*$",
+    r"^(?:please\s+)?(?:what(?:'s|\s+is|s)?\s+(?:the\s+)?weather\s+(?:like\s+)?(?:in|at|for)|weather\s+(?:like\s+)?(?:in|at|for)|"
+    r"temperature\s+(?:like\s+)?(?:in|at|for)|forecast\s+(?:like\s+)?(?:in|at|for))\s+(.+?)[.!?\s]*$",
     re.IGNORECASE,
 )
 _CLOCK_REQUEST_RE = re.compile(
