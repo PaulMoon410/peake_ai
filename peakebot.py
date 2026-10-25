@@ -3350,7 +3350,7 @@ def _ai_chat_openai(system: str, user: str) -> str | None:
             _log_ai_error("OpenAI", res)
             return None
         data = res.json()
-        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
         return answer or None
     except Exception as exc:
         print(f"⚠️ OpenAI failed: {type(exc).__name__}: {str(exc)[:160]}")
@@ -3381,7 +3381,7 @@ def _ai_chat_anthropic(system: str, user: str) -> str | None:
             _log_ai_error("Anthropic", res)
             return None
         data = res.json()
-        answer = data.get("content", [{}])[0].get("text", "").strip()
+        answer = (data.get("content", [{}])[0].get("text") or "").strip()
         return answer or None
     except Exception as exc:
         print(f"⚠️ Anthropic failed: {type(exc).__name__}: {str(exc)[:160]}")
@@ -3413,7 +3413,7 @@ def _ai_chat_google(system: str, user: str) -> str | None:
         if res is None or res.status_code != 200:
             return None
         data = res.json()
-        answer = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+        answer = (data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text") or "").strip()
         return answer or None
     except Exception as exc:
         print(f"⚠️ Google failed: {type(exc).__name__}: {str(exc)[:160]}")
@@ -3445,7 +3445,7 @@ def _ai_chat_groq(system: str, user: str) -> str | None:
         if res is None:
             return None
         data = res.json()
-        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
         return answer or None
     except Exception as exc:
         print(f"⚠️ Groq failed: {type(exc).__name__}: {str(exc)[:160]}")
@@ -3478,7 +3478,7 @@ def _ai_chat_deepseek(system: str, user: str) -> str | None:
             _log_ai_error("DeepSeek", res)
             return None
         data = res.json()
-        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
         return answer or None
     except Exception as exc:
         print(f"⚠️ DeepSeek failed: {type(exc).__name__}: {str(exc)[:160]}")
@@ -3511,7 +3511,7 @@ def _ai_chat_mistral(system: str, user: str) -> str | None:
             _log_ai_error("Mistral", res)
             return None
         data = res.json()
-        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
         return answer or None
     except Exception as exc:
         print(f"⚠️ Mistral failed: {type(exc).__name__}: {str(exc)[:160]}")
@@ -3544,7 +3544,7 @@ def _ai_chat_perplexity(system: str, user: str) -> str | None:
             _log_ai_error("OpenAI", res)
             return None
         data = res.json()
-        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
         return answer or None
     except Exception as exc:
         print(f"⚠️ OpenAI failed: {type(exc).__name__}: {str(exc)[:160]}")
@@ -3579,7 +3579,7 @@ def _ai_chat_openrouter(system: str, user: str) -> str | None:
         if res is None:
             return None
         data = res.json()
-        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
         return answer or None
     except Exception as exc:
         print(f"⚠️ OpenRouter failed: {type(exc).__name__}: {str(exc)[:160]}")
