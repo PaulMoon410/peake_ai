@@ -82,7 +82,7 @@ OPENROUTER_MODELS = [
 GOOGLE_MODELS = [
     m.strip() for m in os.getenv(
         "GOOGLE_MODELS",
-        "gemini-3.8-flash,gemini-3.5-flash-lite,gemini-3.6-flash",
+        "gemini-1.5-flash-8b,gemini-3.8-flash,gemini-3.5-flash-lite,gemini-3.6-flash",
     ).split(",") if m.strip()
 ]
 FTP_UPLOAD_BATCH_SIZE = int(os.getenv("FTP_UPLOAD_BATCH_SIZE", "3"))
