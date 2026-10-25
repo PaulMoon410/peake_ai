@@ -2379,6 +2379,10 @@ _WEATHER_REQUEST_RE = re.compile(
     r"temperature\s+(?:like\s+)?(?:in|at|for)|forecast\s+(?:like\s+)?(?:in|at|for))\s+(.+?)[.!?\s]*$",
     re.IGNORECASE,
 )
+_WEATHER_FOLLOWUP_RE = re.compile(
+    r"^(?:what about|how about|and|also|in)\s+(.+?)[.!?\s]*$",
+    re.IGNORECASE,
+)
 _CLOCK_REQUEST_RE = re.compile(
     r"^(?:please\s+)?(?:what(?:'s| is)\s+(?:the\s+)?(?:current\s+)?time\s+(?:in|at|for)|"
     r"time\s+(?:in|at|for)|clock\s+(?:in|at|for))\s+(.+?)[.!?\s]*$",
@@ -2511,6 +2515,49 @@ def _handle_weather_request(prompt: str) -> str | None:
         return f"Couldn't fetch weather for {city}. Try a different city name."
     except Exception as exc:
         return f"Weather lookup failed for {city}: {type(exc).__name__}"
+
+
+def _is_short_location_input(text: str) -> bool:
+    """Check if input looks like a standalone zip code, city name, or state."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    # 5-digit zip code (optionally +4)
+    if re.match(r"^\d{5}(?:-\d{4})?$", stripped):
+        return True
+    # State abbreviation
+    if re.match(r"^[A-Z]{2}$", stripped.upper()):
+        return True
+    # City name: 1-3 words, no digits, reasonable length
+    words = stripped.split()
+    if 1 <= len(words) <= 3 and len(stripped) <= 40 and not any(c.isdigit() for c in stripped):
+        return True
+    return False
+
+
+def _last_assistant_was_weather(history: list) -> bool:
+    """Return True if the most recent assistant message was a weather report."""
+    for item in reversed(history or []):
+        if item.get("role") == "assistant":
+            content = item.get("content", "")
+            return any(marker in content for marker in ["°F", "°C", "weather", "wttr"])
+    return False
+
+
+def _handle_weather_followup_request(prompt: str, history: list) -> str | None:
+    """Handle short location follow-ups like 'What about 21040?' or bare '21040'
+    after a weather conversation."""
+    stripped = prompt.strip()
+    if not _is_short_location_input(stripped):
+        return None
+    if not _last_assistant_was_weather(history):
+        return None
+    match = _WEATHER_FOLLOWUP_RE.match(stripped)
+    location = match.group(1).strip() if match else stripped
+    if not location:
+        return None
+    fake_prompt = f"weather in {location}"
+    return _handle_weather_request(fake_prompt)
 
 
 def _handle_clock_request(prompt: str) -> str | None:
@@ -3931,6 +3978,11 @@ def generate_response(prompt, conversation_history=None):
     if weather_response is not None:
         remember(raw_prompt, weather_response)
         return weather_response
+
+    weather_followup_response = _handle_weather_followup_request(raw_prompt, history)
+    if weather_followup_response is not None:
+        remember(raw_prompt, weather_followup_response)
+        return weather_followup_response
 
     clock_response = _handle_clock_request(raw_prompt)
     if clock_response is not None:
