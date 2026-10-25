@@ -1839,7 +1839,24 @@ class MemoryStore:
         # All records fit before the first remote write is attempted.
         for index, group in groups:
             command = "APPE " if index < original_count else "STOR "
-            _ftp_store_binary(client, command + self._remote_shard_path(index), io.BytesIO(b"".join(group)))
+            payload_bytes = b"".join(group)
+            shard_path = self._remote_shard_path(index)
+            try:
+                _ftp_store_binary(client, command + shard_path, io.BytesIO(payload_bytes))
+            except ftplib.all_errors as exc:
+                if not command.strip().upper().startswith("APPE"):
+                    raise
+                # Some FTP servers (e.g. Geocities) reject APPE with
+                # "451 Append/Restart not permitted". Fall back to downloading
+                # the existing shard, appending locally, and STORing it back.
+                existing = self._download_shard_bytes(client, shard_path)
+                _ftp_store_binary(client, "STOR " + shard_path, io.BytesIO(existing + payload_bytes))
+
+    def _download_shard_bytes(self, client: ftplib.FTP, path: str) -> bytes:
+        """Download an entire remote shard into memory for append-then-upload fallback."""
+        buf: list[bytes] = []
+        _ftp_retr_binary(client, "RETR " + path, buf.append)
+        return b"".join(buf)
 
     def upload(self, record: dict[str, str]) -> None:
         """Append one note to the current capped FTP shard or create the next shard."""
