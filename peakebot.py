@@ -3229,7 +3229,11 @@ def _store_ai_chat(prompt: str, response: str, provider: str) -> str:
     category = _categorize_chat(prompt, response)
     store = _get_mcf_memory_store()
     note = f"[{provider}] {response}"
-    record = store.add(note, category=f"Knowledge/AI/{category}", source=f"ai:{provider}")
+    try:
+        record = store.add(note, category=f"Knowledge/AI/{category}", source=f"ai:{provider}")
+    except Exception as exc:
+        print(f"⚠️ AI chat memory save failed: {exc}")
+        record = None
     storage = "saved locally"
     if record and getattr(store, "ftp_configured", False):
         try:
