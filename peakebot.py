@@ -3,7 +3,7 @@ import os
 import time
 import threading
 import queue as queue_mod
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 try:
     from zoneinfo import ZoneInfo
@@ -29,6 +29,7 @@ from my_ai.math_learner import MathLearner
 from my_ai.memory_store import MemoryStore, _MAX_NOTE_CHARS
 from my_ai.memory_organizer import sync_and_organize, HttpRecallCoordinator, organize_memory
 from my_ai.trading_bridge import TradingBridge
+from my_ai.integrations.integration_manager import IntegrationManager
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus, urlparse
 import tempfile
@@ -2373,6 +2374,25 @@ _HELP_REQUEST_RE = re.compile(
     r"how\s+do\s+i\s+use\s+you)[.!?\s]*$",
     re.IGNORECASE,
 )
+_WEATHER_REQUEST_RE = re.compile(
+    r"^(?:please\s+)?(?:what(?:'s| is)\s+the\s+weather\s+(?:in|at|for)|weather\s+(?:in|at|for)|"
+    r"temperature\s+(?:in|at|for)|forecast\s+(?:in|at|for))\s+(.+?)[.!?\s]*$",
+    re.IGNORECASE,
+)
+_CLOCK_REQUEST_RE = re.compile(
+    r"^(?:please\s+)?(?:what(?:'s| is)\s+(?:the\s+)?(?:current\s+)?time\s+(?:in|at|for)|"
+    r"time\s+(?:in|at|for)|clock\s+(?:in|at|for))\s+(.+?)[.!?\s]*$",
+    re.IGNORECASE,
+)
+_CALENDAR_REQUEST_RE = re.compile(
+    r"^(?:please\s+)?(?:what(?:'s| is)\s+on\s+(?:my\s+)?calendar|calendar\s+(?:events|schedule|appointments)|"
+    r"(?:my\s+)?calendar\s+(?:today|this week|tomorrow)|upcoming\s+events|schedule\s+(?:for|today))\s*(.+)?[.!?\s]*$",
+    re.IGNORECASE,
+)
+_CALENDAR_ADD_RE = re.compile(
+    r"^(?:please\s+)?(?:add|create|schedule)\s+(?:an?\s+)?(?:event|appointment|meeting)\s+(?:called\s+)?(.+?)\s+(?:on|at|for)\s+(.+?)[.!?\s]*$",
+    re.IGNORECASE,
+)
 _LEARN_WEBSITE_RE = re.compile(
     r"^(?:please\s+)?(?:learn from|read and learn from|study)\s+(https?://\S+)$",
     re.IGNORECASE,
@@ -2391,6 +2411,10 @@ _HELP_RESPONSE = """Here are the commands I understand in this chat:
 • recall math: <topic> — search saved math notes, including the shared archive when FTP is available.
 • remember that <note> — save a useful general memory (not passwords, keys, or tokens).
 • search web: <question> — research a question on the web.
+• weather in <city> — current weather for a city (free wttr.in API).
+• time in <city/timezone> — current local time for a city or time zone.
+• calendar events — list upcoming calendar events (Google Calendar if configured).
+• add event <name> on <datetime> — add a calendar event (Google Calendar if configured).
 • help or commands — show this list.
 
 For a longer math note, try: learn math: The area of a circle is pi times the radius squared; circumference is 2 times pi times the radius. These are stored as unverified notes unless I can check them as basic arithmetic.
@@ -2467,6 +2491,156 @@ def _handle_math_request(prompt: str) -> str | None:
     if expression and _is_simple_math_expression(expression):
         return _learn_math_statement(expression)
     return None
+
+
+def _handle_weather_request(prompt: str) -> str | None:
+    """Fetch current weather for a city using the free wttr.in API (no key required)."""
+    match = _WEATHER_REQUEST_RE.fullmatch(prompt.strip())
+    if not match:
+        return None
+    city = match.group(1).strip()
+    if not city:
+        return None
+    try:
+        url = f"https://wttr.in/{quote_plus(city)}?format=3"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200 and resp.text.strip():
+            result = resp.text.strip()
+            # format=3 returns: "City: ☁️ +12°C"
+            return f"{result}"
+        return f"Couldn't fetch weather for {city}. Try a different city name."
+    except Exception as exc:
+        return f"Weather lookup failed for {city}: {type(exc).__name__}"
+
+
+def _handle_clock_request(prompt: str) -> str | None:
+    """Report current time for a city/timezone using zoneinfo, with worldtimeapi.org fallback."""
+    match = _CLOCK_REQUEST_RE.fullmatch(prompt.strip())
+    if not match:
+        return None
+    tz_name = match.group(1).strip()
+    if not tz_name:
+        return None
+    tz_name = tz_name.lower().strip(".,!?")
+    # Map common city names to IANA timezones
+    city_tz_map = {
+        "new york": "America/New_York", "nyc": "America/New_York",
+        "london": "Europe/London", "uk": "Europe/London",
+        "tokyo": "Asia/Tokyo", "japan": "Asia/Tokyo",
+        "sydney": "Australia/Sydney", "australia": "Australia/Sydney",
+        "berlin": "Europe/Berlin", "germany": "Europe/Berlin",
+        "paris": "Europe/Paris", "france": "Europe/Paris",
+        "moscow": "Europe/Moscow", "russia": "Europe/Moscow",
+        "dubai": "Asia/Dubai", "uae": "Asia/Dubai",
+        "mumbai": "Asia/Kolkata", "india": "Asia/Kolkata",
+        "sao paulo": "America/Sao_Paulo", "brazil": "America/Sao_Paulo",
+        "los angeles": "America/Los_Angeles", "la": "America/Los_Angeles",
+        "chicago": "America/Chicago", "toronto": "America/Toronto",
+        "vancouver": "America/Vancouver", "montreal": "America/Montreal",
+        "seoul": "Asia/Seoul", "korea": "Asia/Seoul",
+        "singapore": "Asia/Singapore", "hong kong": "Asia/Hong_Kong",
+        "shanghai": "Asia/Shanghai", "china": "Asia/Shanghai",
+        "dubai": "Asia/Dubai",
+    }
+    tz_key = tz_name
+    if tz_key in city_tz_map:
+        tz_key = city_tz_map[tz_key]
+    try:
+        tz = ZoneInfo(tz_key)
+        now = datetime.now(tz)
+        return f"The current time in {tz_name} is {now.strftime('%I:%M %p %Z')} on {now.strftime('%A, %B %d, %Y')}."
+    except Exception:
+        pass
+    # Fallback: try worldtimeapi.org
+    try:
+        api_tz = tz_key.replace(" ", "_").title()
+        url = f"http://worldtimeapi.org/api/timezone/{api_tz}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            dt = data.get("datetime", "")
+            if dt:
+                from datetime import datetime as _dt
+                parsed = _dt.fromisoformat(dt)
+                return f"The current time in {tz_name} is {parsed.strftime('%I:%M %p')} on {parsed.strftime('%A, %B %d, %Y')}."
+        return f"Couldn't determine the time zone for {tz_name}. Try a city name like London, Tokyo, or New York."
+    except Exception as exc:
+        return f"Clock lookup failed for {tz_name}: {type(exc).__name__}"
+
+
+_calendar_manager = None
+
+
+def _get_calendar_manager():
+    global _calendar_manager
+    if _calendar_manager is None:
+        _calendar_manager = IntegrationManager()
+    return _calendar_manager
+
+
+def _handle_calendar_request(prompt: str) -> str | None:
+    """Read upcoming calendar events via Google Calendar (if configured) or memory store."""
+    match = _CALENDAR_REQUEST_RE.fullmatch(prompt.strip())
+    if not match:
+        return None
+    try:
+        mgr = _get_calendar_manager()
+        if mgr.google_calendar:
+            now = datetime.utcnow()
+            end = now + timedelta(days=7)
+            events = mgr.google_calendar.get_events(
+                time_min=now, time_max=end, max_results=5
+            )
+            if not events:
+                return "No upcoming calendar events in the next 7 days."
+            lines = ["Upcoming calendar events:"]
+            for ev in events:
+                start = ev.get("start", {}).get("dateTime", ev.get("start", {}).get("date", ""))
+                summary = ev.get("summary", "(no title)")
+                if start:
+                    try:
+                        dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                        lines.append(f"• {dt.strftime('%b %d, %I:%M %p')} — {summary}")
+                    except Exception:
+                        lines.append(f"• {start} — {summary}")
+                else:
+                    lines.append(f"• {summary}")
+            return "\n".join(lines)
+        # Fallback: check memory for saved calendar events
+        store = _get_mcf_memory_store()
+        hits = store.relevant("calendar events appointments schedule", limit=5)
+        if hits:
+            lines = ["Saved calendar events:"]
+            for h in hits[:5]:
+                lines.append(f"• {h.get('note', h.get('content', str(h)))[:120]}")
+            return "\n".join(lines)
+        return "No calendar events found. Google Calendar is not configured; save events with 'remember that ...'."
+    except Exception as exc:
+        return f"Calendar lookup failed: {type(exc).__name__}"
+
+
+def _handle_calendar_add_request(prompt: str) -> str | None:
+    """Add a calendar event via Google Calendar (if configured)."""
+    match = _CALENDAR_ADD_RE.fullmatch(prompt.strip())
+    if not match:
+        return None
+    summary = match.group(1).strip()
+    when = match.group(2).strip()
+    try:
+        mgr = _get_calendar_manager()
+        if not mgr.google_calendar:
+            return "Google Calendar is not configured (credentials.json required). I can't add events without it."
+        start_dt = datetime.fromisoformat(when)
+        if start_dt.tzinfo is None:
+            from zoneinfo import ZoneInfo as _ZI
+            start_dt = start_dt.replace(tzinfo=_ZI("UTC"))
+        end_dt = start_dt + timedelta(hours=1)
+        event = mgr.google_calendar.create_event(
+            summary=summary, start_time=start_dt, end_time=end_dt
+        )
+        return f"Calendar event created: {event.get('summary', summary)} on {start_dt.strftime('%b %d, %I:%M %p')}."
+    except Exception as exc:
+        return f"Failed to add calendar event: {type(exc).__name__}"
 
 
 def _handle_help_request(prompt: str) -> str | None:
@@ -3753,6 +3927,26 @@ def generate_response(prompt, conversation_history=None):
         remember(raw_prompt, math_response)
         return math_response
 
+    weather_response = _handle_weather_request(raw_prompt)
+    if weather_response is not None:
+        remember(raw_prompt, weather_response)
+        return weather_response
+
+    clock_response = _handle_clock_request(raw_prompt)
+    if clock_response is not None:
+        remember(raw_prompt, clock_response)
+        return clock_response
+
+    calendar_add_response = _handle_calendar_add_request(raw_prompt)
+    if calendar_add_response is not None:
+        remember(raw_prompt, calendar_add_response)
+        return calendar_add_response
+
+    calendar_response = _handle_calendar_request(raw_prompt)
+    if calendar_response is not None:
+        remember(raw_prompt, calendar_response)
+        return calendar_response
+
     saved_response = _save_explicit_mcf_memory(raw_prompt)
     if saved_response is not None:
         if saved_response.startswith(("Got it—", "I already have")):
@@ -3785,6 +3979,28 @@ def generate_response(prompt, conversation_history=None):
         remember(raw_prompt, basic_reply)
         return basic_reply
 
+    # PRIMARY: AI providers first — OpenAI → OpenRouter → Anthropic → Google →
+    # Groq → Deepseek → Mistral → Perplexity. Local memory is only a fallback.
+    ai_result = _ai_chat_completion(raw_prompt, "")
+    ai_answer = ai_result.get("answer")
+    ai_provider = ai_result.get("provider")
+    if ai_answer:
+        storage = _store_ai_chat(raw_prompt, ai_answer, ai_provider or "unknown")
+        ai_answer = ai_answer.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
+        remember(raw_prompt, ai_answer)
+        return f"{ai_answer}\n\n(Answered via {ai_provider}; {storage}.)"
+
+    # All AI providers failed or returned nothing — fall back to local memory.
+    tried = ai_result.get("tried", []) or []
+    failures = ai_result.get("failures", {}) or {}
+    provider_note = ""
+    if tried:
+        failed_list = [f"{p} ({failures.get(p, 'no response')})" for p in tried if p in failures]
+        if failed_list:
+            provider_note = f"\n\n(AI providers tried: {', '.join(failed_list)} — all unavailable right now.)"
+        else:
+            provider_note = f"\n\n(AI providers tried: {', '.join(tried)} — none returned an answer.)"
+
     memory_query = raw_prompt
     previous_user = next((item["content"] for item in reversed(history) if item["role"] == "user"), "")
     if previous_user:
@@ -3813,50 +4029,16 @@ def generate_response(prompt, conversation_history=None):
             print(f"⚠️ Web research failed: {exc}")
             return {"hits": [], "text": None}
 
-    # An explicit request to search takes priority. Uncertain answers also trigger
-    # synchronous research before Harold responds.
+    # An explicit request to search takes priority.
     if web_trigger:
         verified = research()
         response = _answer_from_research(raw_prompt, verified.get("hits", []), history, memory_context)
         if verified.get("hits"):
             _get_intent_learner().learn_intent(raw_prompt, "search")
-        remember(raw_prompt, response)
-        return response
-
-    user_prompt = build_conversation_prompt(raw_prompt, history, memory_context)
-
-    # PRIMARY: AI providers — OpenAI first, then fallbacks. Learn from every
-    # interaction: categorize and upload to MCF3/FTP memory so knowledge
-    # persists across deploys and compounds over time.
-    ai_result = _ai_chat_completion(raw_prompt, memory_context)
-    ai_answer = ai_result.get("answer")
-    ai_provider = ai_result.get("provider")
-    if ai_answer:
-        storage = _store_ai_chat(raw_prompt, ai_answer, ai_provider or "unknown")
-        ai_answer = ai_answer.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
-        remember(raw_prompt, ai_answer)
-        return f"{ai_answer}\n\n(Answered via {ai_provider}; {storage}.)"
-
-    # All AI providers failed or returned nothing — tell the user which were tried.
-    tried = ai_result.get("tried", []) or []
-    failures = ai_result.get("failures", {}) or {}
-    provider_note = ""
-    if tried:
-        failed_list = [f"{p} ({failures.get(p, 'no response')})" for p in tried if p in failures]
-        if failed_list:
-            provider_note = f"\n\n(AI providers tried: {', '.join(failed_list)} — all unavailable right now.)"
-        else:
-            provider_note = f"\n\n(AI providers tried: {', '.join(tried)} — none returned an answer.)"
-
-    # SUPPLEMENT: free web research if the user explicitly asked to search.
-    if web_trigger:
-        verified = research()
-        response = _answer_from_research(raw_prompt, verified.get("hits", []), history, memory_context)
-        if verified.get("hits"):
-            _get_intent_learner().learn_intent(raw_prompt, "search")
-        response = response.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
         remember(raw_prompt, response)
         return response + provider_note
+
+    user_prompt = build_conversation_prompt(raw_prompt, history, memory_context)
 
     # LAST RESORT: local neural model (kept running even without AI keys).
     try:
@@ -3878,20 +4060,19 @@ def generate_response(prompt, conversation_history=None):
             except Exception:
                 pass
             remember(raw_prompt, response)
-            return response
+            return response + provider_note
 
     if not response or _response_seems_low_confidence(response):
         response = (
             "I’m not well informed on this yet. I tried to research it, but "
             "couldn’t find enough reliable information to give you a confident answer."
         )
-        tried = ai_result.get("tried", []) or []
         if tried:
             response += f"\n\n(AI providers attempted: {', '.join(tried)} — all unavailable right now.)"
 
     response = response.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
     remember(raw_prompt, response)
-    return response
+    return response + provider_note
 
 def post_to_hive(title, body):
     hive = init_hive()
