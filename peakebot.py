@@ -15,7 +15,7 @@ import io
 import re
 import requests
 from language_model import NeuralLanguageModel, create_training_data
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from intent_learner import IntentLearner
 from my_ai.conversation import (
@@ -3651,10 +3651,14 @@ def _ai_chat_openrouter(system: str, user: str) -> str | None:
         return None
 
 
-def _ai_chat_completion(prompt: str, memory_context: str = "") -> tuple[str | None, str | None]:
+def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]:
     """Try AI providers in order: OpenAI first, then fallbacks.
 
-    Returns (answer, provider_name) or (None, None).
+    Returns a dict with:
+      answer: the AI response text, or None
+      provider: the provider name that answered, or None
+      tried: list of provider names attempted
+      failures: dict of provider_name -> error message for failed providers
     """
     system = (
         "You are Harold, a helpful AI assistant. Answer concisely and "
@@ -3664,16 +3668,27 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> tuple[str | No
     if memory_context:
         user = f"Relevant prior context: {memory_context}\n\nUser question: {prompt}"
 
+    result: dict[str, Any] = {
+        "answer": None,
+        "provider": None,
+        "tried": [],
+        "failures": {},
+    }
     for provider_name, func_name in _ordered_ai_providers():
+        result["tried"].append(provider_name)
         try:
             func = globals()[func_name]
             answer = func(system, user)
             if answer:
-                return answer, provider_name
+                result["answer"] = answer
+                result["provider"] = provider_name
+                return result
         except Exception as exc:
-            print(f"⚠️ AI provider {provider_name} failed: {type(exc).__name__}: {str(exc)[:120]}")
+            msg = f"{type(exc).__name__}: {str(exc)[:120]}"
+            result["failures"][provider_name] = msg
+            print(f"⚠️ AI provider {provider_name} failed: {msg}")
             continue
-    return None, None
+    return result
 
 
 def generate_response(prompt, conversation_history=None):
@@ -3797,12 +3812,25 @@ def generate_response(prompt, conversation_history=None):
     # PRIMARY: AI providers — OpenAI first, then fallbacks. Learn from every
     # interaction: categorize and upload to MCF3/FTP memory so knowledge
     # persists across deploys and compounds over time.
-    ai_answer, ai_provider = _ai_chat_completion(raw_prompt, memory_context)
+    ai_result = _ai_chat_completion(raw_prompt, memory_context)
+    ai_answer = ai_result.get("answer")
+    ai_provider = ai_result.get("provider")
     if ai_answer:
-        storage = _store_ai_chat(raw_prompt, ai_answer, ai_provider)
+        storage = _store_ai_chat(raw_prompt, ai_answer, ai_provider or "unknown")
         ai_answer = ai_answer.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
         remember(raw_prompt, ai_answer)
         return f"{ai_answer}\n\n(Answered via {ai_provider}; {storage}.)"
+
+    # All AI providers failed or returned nothing — tell the user which were tried.
+    tried = ai_result.get("tried", []) or []
+    failures = ai_result.get("failures", {}) or {}
+    provider_note = ""
+    if tried:
+        failed_list = [f"{p} ({failures.get(p, 'no response')})" for p in tried if p in failures]
+        if failed_list:
+            provider_note = f"\n\n(AI providers tried: {', '.join(failed_list)} — all unavailable right now.)"
+        else:
+            provider_note = f"\n\n(AI providers tried: {', '.join(tried)} — none returned an answer.)"
 
     # SUPPLEMENT: free web research if the user explicitly asked to search.
     if web_trigger:
@@ -3812,7 +3840,7 @@ def generate_response(prompt, conversation_history=None):
             _get_intent_learner().learn_intent(raw_prompt, "search")
         response = response.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
         remember(raw_prompt, response)
-        return response
+        return response + provider_note
 
     # LAST RESORT: local neural model (kept running even without AI keys).
     try:
@@ -3841,6 +3869,9 @@ def generate_response(prompt, conversation_history=None):
             "I’m not well informed on this yet. I tried to research it, but "
             "couldn’t find enough reliable information to give you a confident answer."
         )
+        tried = ai_result.get("tried", []) or []
+        if tried:
+            response += f"\n\n(AI providers attempted: {', '.join(tried)} — all unavailable right now.)"
 
     response = response.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
     remember(raw_prompt, response)
