@@ -52,8 +52,11 @@ _FTP_STARTUP_SYNC_MAX_ATTEMPTS = int(os.getenv("FTP_STARTUP_SYNC_MAX_ATTEMPTS", 
 _MODEL_WARMUP_LOCK = threading.Lock()
 _MODEL_WARMUP_STARTED = False
 
+CHAT_API_KEY = os.getenv("CHAT_API_KEY", "").strip()
 ADMIN_PANEL_ENABLED = os.getenv("ADMIN_PANEL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+
+# ... rest of existing config
 # The trading bot runs on the operator's machine and calls this service.
 # It gets its own key so trading traffic can be rotated independently.
 TRADING_API_KEY = os.getenv("TRADING_API_KEY", "") or ADMIN_API_KEY
@@ -171,6 +174,15 @@ def _is_admin_authorized(req) -> bool:
     if not incoming or not ADMIN_API_KEY:
         return False
     return hmac.compare_digest(incoming, ADMIN_API_KEY)
+
+
+@app.after_request
+def _add_cors_headers(response: Response) -> Response:
+    """Allow other Render apps (and browser frontends) to call this API."""
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Admin-Key, X-Trading-Key, X-Api-Key"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
 
 
 @app.get("/health")
@@ -755,8 +767,18 @@ def admin_ftp_status() -> Response:
     return jsonify(get_ftp_status())
 
 
-@app.post("/api/chat")
+@app.route("/api/chat", methods=["POST", "OPTIONS"])
 def api_chat() -> Response:
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True})
+    # Optional API key for chat: when CHAT_API_KEY is set, callers must present
+    # it via X-Api-Key so different apps get separate rate limits and access
+    # control instead of sharing one public bucket.
+    if CHAT_API_KEY:
+        incoming = (request.headers.get("X-Api-Key", "") or "").strip()
+        if not incoming or not hmac.compare_digest(incoming, CHAT_API_KEY):
+            return jsonify({"error": "unauthorized"}), 401
+
     payload = request.get_json(silent=True) or {}
     prompt = str(payload.get("prompt", "")).strip()
     if not prompt:
