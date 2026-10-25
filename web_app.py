@@ -371,10 +371,7 @@ def index() -> Response:
         try {
           const res = await fetch('/api/chat', {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Api-Key': 'b9ec790653dbc43dfde86f18fb733c458b41997873500a28'
-            },
+            headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({prompt: item.prompt, history: conversationHistory.slice(-12)})
           });
           const responseText = await res.text();
