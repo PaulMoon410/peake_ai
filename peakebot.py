@@ -57,17 +57,40 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free").strip()
+# Model IDs to try per provider. Keys without credit/access still rank first when
+# configured, and a 404 on the first model rolls over to the next candidate.
+GROQ_MODELS = [
+    m.strip() for m in os.getenv(
+        "GROQ_MODEL",
+        "openai/gpt-oss-20b,llama-3.3-70b-versatile,openai/gpt-oss-120b",
+    ).split(",") if m.strip()
+]
+OPENROUTER_MODELS = [
+    m.strip() for m in os.getenv(
+        "OPENROUTER_MODELS",
+        "openrouter/free,nvidia/nemotron-3.5-lightning:free,google/gemma-4-26b-a4b-it:free,openrouter/auto",
+    ).split(",") if m.strip()
+]
+GOOGLE_MODELS = [
+    m.strip() for m in os.getenv(
+        "GOOGLE_MODELS",
+        "gemini-2.5-flash,gemini-3.5-flash-lite,gemini-3.6-flash",
+    ).split(",") if m.strip()
+]
 FTP_UPLOAD_BATCH_SIZE = int(os.getenv("FTP_UPLOAD_BATCH_SIZE", "3"))
 # Upload work runs on a background worker so a chat turn never waits on FTP.
 # The queue is capped; if FTP is down the oldest batch is dropped rather than
 # growing without bound, and the startup archive sync recovers anything lost.
 FTP_UPLOAD_QUEUE_MAX_BATCHES = int(os.getenv("FTP_UPLOAD_QUEUE_MAX_BATCHES", "20"))
 FTP_UPLOAD_BACKLOG_MAX_ENTRIES = int(os.getenv("FTP_UPLOAD_BACKLOG_MAX_ENTRIES", "5000"))
+FTP_DAILY_UPLOAD_INTERVAL_SECONDS = int(os.getenv("FTP_DAILY_UPLOAD_INTERVAL_SECONDS", "21600"))
 MODEL_FTP_TIMEOUT_SECONDS = 8
 _FTP_BLOCK_MAX_ATTEMPTS = int(os.getenv("FTP_BLOCK_MAX_ATTEMPTS", "3"))
 LEARNING_QUEUE_FILE = "learning_queue.json"
@@ -3156,6 +3179,22 @@ _AI_PROVIDERS = [
     ("perplexity", "_ai_chat_perplexity"),
 ]
 
+# Providers preferred ahead of the default order. Set AI_PROVIDER_ORDER="groq,google"
+# to make a funded provider the primary and stop paying latency for exhausted ones.
+_PROVIDER_ORDER_PREFERENCE = [
+    p.strip().lower() for p in os.getenv("AI_PROVIDER_ORDER", "").split(",") if p.strip()
+]
+
+
+def _ordered_ai_providers() -> list[tuple[str, str]]:
+    """Return providers with any AI_PROVIDER_ORDER preferences moved to the front."""
+    if not _PROVIDER_ORDER_PREFERENCE:
+        return list(_AI_PROVIDERS)
+    by_name = dict(_AI_PROVIDERS)
+    ordered = [(name, by_name[name]) for name in _PROVIDER_ORDER_PREFERENCE if name in by_name]
+    ordered.extend(item for item in _AI_PROVIDERS if item[0] not in _PROVIDER_ORDER_PREFERENCE)
+    return ordered
+
 _CHAT_CATEGORY_KEYWORDS = {
     "programming": ["code", "python", "javascript", "function", "variable", "api", "bug", "debug", "script", "class"],
     "math": ["calculate", "equation", "algebra", "calculus", "geometry", "number", "arithmetic", "solve", "plus", "minus", "times", "divided", "equals", "sum", "answer", "2+2", "math"],
@@ -3223,6 +3262,39 @@ def _log_ai_error(provider: str, res) -> None:
     except Exception:
         pass
     print(f"⚠️ {provider} returned HTTP {res.status_code}: {body}")
+
+
+def _post_with_model_fallback(provider: str, url: str, headers: dict, payload: dict,
+                              models: list[str], timeout: int = 20):
+    """POST to an OpenAI-compatible endpoint, rolling over on model-not-found.
+
+    Returns the successful ``requests`` response, or ``None`` once every
+    candidate model has failed. A 400/404 (unknown or inaccessible model) moves
+    to the next candidate; other failures (402/403/429/5xx) are billing, quota,
+    or outage problems that a different model ID cannot fix, so they stop the
+    loop immediately.
+    """
+    if not models:
+        return None
+    last_status = None
+    for model in models:
+        try:
+            body = dict(payload)
+            body["model"] = model
+            res = requests.post(url, headers=headers, json=body, timeout=timeout)
+        except Exception as exc:
+            print(f"⚠️ {provider} ({model}) failed: {type(exc).__name__}: {str(exc)[:160]}")
+            continue
+        if res.status_code == 200:
+            if model != models[0]:
+                print(f"ℹ️ {provider}: fell back to model {model}")
+            return res
+        _log_ai_error(f"{provider} ({model})", res)
+        last_status = res.status_code
+        if res.status_code not in (400, 404):
+            return None
+    print(f"⚠️ {provider}: no usable model in {models} (last HTTP {last_status})")
+    return None
 
 
 def _ai_chat_openai(system: str, user: str) -> str | None:
@@ -3295,17 +3367,24 @@ def _ai_chat_google(system: str, user: str) -> str | None:
     if not GOOGLE_API_KEY:
         return None
     try:
-        res = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}",
-            headers={"Content-Type": "application/json"},
-            json={
-                "contents": [{"parts": [{"text": f"{system}\n\n{user}"}]}],
-                "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7},
-            },
-            timeout=20,
-        )
-        if res.status_code != 200:
-            _log_ai_error("Google", res)
+        models = [GOOGLE_MODEL] + [m for m in GOOGLE_MODELS if m != GOOGLE_MODEL]
+        res = None
+        for model in models:
+            res = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GOOGLE_API_KEY}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{"parts": [{"text": f"{system}\n\n{user}"}]}],
+                    "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7},
+                },
+                timeout=20,
+            )
+            if res.status_code == 200:
+                break
+            _log_ai_error(f"Google ({model})", res)
+            if res.status_code not in (400, 404):
+                return None
+        if res is None or res.status_code != 200:
             return None
         data = res.json()
         answer = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
@@ -3320,14 +3399,14 @@ def _ai_chat_groq(system: str, user: str) -> str | None:
     if not GROQ_API_KEY:
         return None
     try:
-        res = requests.post(
+        res = _post_with_model_fallback(
+            "Groq",
             "https://api.groq.com/openai/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {GROQ_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": "llama-3.1-8b-instant",
+            payload={
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -3335,10 +3414,9 @@ def _ai_chat_groq(system: str, user: str) -> str | None:
                 "temperature": 0.7,
                 "max_tokens": 400,
             },
-            timeout=20,
+            models=GROQ_MODELS,
         )
-        if res.status_code != 200:
-            _log_ai_error("Groq", res)
+        if res is None:
             return None
         data = res.json()
         answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
@@ -3452,7 +3530,9 @@ def _ai_chat_openrouter(system: str, user: str) -> str | None:
     if not OPENROUTER_API_KEY:
         return None
     try:
-        res = requests.post(
+        models = [OPENROUTER_MODEL] + [m for m in OPENROUTER_MODELS if m != OPENROUTER_MODEL]
+        res = _post_with_model_fallback(
+            "OpenRouter",
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -3460,8 +3540,7 @@ def _ai_chat_openrouter(system: str, user: str) -> str | None:
                 "HTTP-Referer": "https://peakebot.ai",
                 "X-Title": "PeakeBot Harold",
             },
-            json={
-                "model": "openrouter/auto",
+            payload={
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -3469,10 +3548,9 @@ def _ai_chat_openrouter(system: str, user: str) -> str | None:
                 "temperature": 0.7,
                 "max_tokens": 400,
             },
-            timeout=20,
+            models=models,
         )
-        if res.status_code != 200:
-            _log_ai_error("OpenRouter", res)
+        if res is None:
             return None
         data = res.json()
         answer = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
@@ -3495,7 +3573,7 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> tuple[str | No
     if memory_context:
         user = f"Relevant prior context: {memory_context}\n\nUser question: {prompt}"
 
-    for provider_name, func_name in _AI_PROVIDERS:
+    for provider_name, func_name in _ordered_ai_providers():
         try:
             func = globals()[func_name]
             answer = func(system, user)
