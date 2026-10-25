@@ -3676,6 +3676,22 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
     }
     for provider_name, func_name in _ordered_ai_providers():
         result["tried"].append(provider_name)
+        # Skip providers without an API key, but record why so the user sees
+        # exactly which ones were bypassed instead of silently ignored.
+        key_var = {
+            "openai": OPENAI_API_KEY,
+            "openrouter": OPENROUTER_API_KEY,
+            "anthropic": ANTHROPIC_API_KEY,
+            "google": GOOGLE_API_KEY,
+            "groq": GROQ_API_KEY,
+            "deepseek": DEEPSEEK_API_KEY,
+            "mistral": MISTRAL_API_KEY,
+            "perplexity": PERPLEXITY_API_KEY,
+        }.get(provider_name, "")
+        if not key_var:
+            result["failures"][provider_name] = "no API key configured"
+            print(f"⚠️ AI provider {provider_name} skipped: no API key configured")
+            continue
         try:
             func = globals()[func_name]
             answer = func(system, user)
