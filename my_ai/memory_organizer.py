@@ -30,7 +30,7 @@ from typing import Any
 
 import requests
 
-from memory_store import (
+from my_ai.memory_store import (
     MemoryStore,
     _ALIAS_CATEGORY,
     _CONSOLIDATED_CATEGORY,
