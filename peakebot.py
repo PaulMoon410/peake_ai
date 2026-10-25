@@ -3230,7 +3230,9 @@ def _store_ai_chat(prompt: str, response: str, provider: str) -> str:
     store = _get_mcf_memory_store()
     note = f"[{provider}] {response}"
     try:
-        record = store.add(note, category=f"Knowledge/AI/{category}", source=f"ai:{provider}")
+        record = store.add(
+            note, category=f"Knowledge/AI/{category}", source="https://peake-ai.onrender.com/"
+        )
     except Exception as exc:
         print(f"⚠️ AI chat memory save failed: {exc}")
         record = None
