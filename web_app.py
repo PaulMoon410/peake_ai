@@ -298,6 +298,9 @@ def index() -> Response:
       <span class=\"dot d3\"></span>
       <span class=\"title\">Harold Public Terminal</span>
     </div>
+    <div id=\"startup-warning\" style=\"padding:10px 14px; background:#f59e0b; color:#451a03; font-size:13px; border-bottom:1px solid #1f2937; display:none;\">
+      ⚠️ Harold is starting up. The first message may take 30–90 seconds while the AI model warms up — please wait, don’t close the page.
+    </div>
     <div id=\"log\"></div>
     <div class=\"input\">
       <textarea id=\"prompt\" placeholder=\"Type your message...\"></textarea>
@@ -313,6 +316,7 @@ def index() -> Response:
     const sendBtn = document.getElementById('send');
     const steerBtn = document.getElementById('steer');
     const queueStatus = document.getElementById('queue-status');
+    const startupWarning = document.getElementById('startup-warning');
     const conversationHistory = [];
     const messageQueue = [];
     const MAX_QUEUED_MESSAGES = 20;
@@ -360,6 +364,7 @@ def index() -> Response:
     async function processQueue() {
       if (processingQueue) return;
       processingQueue = true;
+      if (startupWarning) startupWarning.style.display = 'block';
       while (messageQueue.length) {
         const item = messageQueue.shift();
         updateQueueStatus(item.steer ? 'Applying steering instruction…' : 'Harold is responding…');
@@ -396,6 +401,7 @@ def index() -> Response:
       }
       processingQueue = false;
       activeStatus = '';
+      if (startupWarning) startupWarning.style.display = 'none';
       updateQueueStatus();
       promptEl.focus();
     }
