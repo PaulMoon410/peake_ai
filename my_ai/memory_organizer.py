@@ -413,7 +413,7 @@ def organize_memory(
         new_rec = store.add(
             synth_note,
             category=f"Knowledge/Synthesis/{synth_cat}",
-            source="organizer-internal",
+            source="https://peake-ai.onrender.com/",
         )
         if new_rec:
             consolidated_count += 1
@@ -461,7 +461,7 @@ def organize_memory(
                 rec = store.add(
                     chunk,
                     category="Knowledge/Organized/Base",
-                    source="organizer-internal",
+                    source="https://peake-ai.onrender.com/",
                 )
                 if rec:
                     written = True

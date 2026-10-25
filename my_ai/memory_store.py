@@ -420,7 +420,7 @@ class MemoryStore:
         """Build or update a persistent full-text index with Porter stemming."""
         try:
             self._index_path.parent.mkdir(parents=True, exist_ok=True)
-            self._index = sqlite3.connect(self._index_path)
+            self._index = sqlite3.connect(self._index_path, check_same_thread=False)
 
             # Check if existing table needs upgrade to porter stemmer
             needs_recreate = False
