@@ -1940,7 +1940,7 @@ class MemoryStore:
                 if attempt + 1 < attempts:
                     time.sleep(_SYNC_BACKOFF_SECONDS * (2 ** attempt))
         raise RuntimeError(
-            f"FTP upload failed after {attempts} attempt(s): {type(last_error).__name__}"
+            f"FTP upload failed after {attempts} attempt(s): {type(last_error).__name__}: {last_error}"
         ) from last_error
 
     def _archive_records_view(self) -> list[dict[str, str]]:

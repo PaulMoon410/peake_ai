@@ -3250,9 +3250,14 @@ def _store_ai_chat(prompt: str, response: str, provider: str) -> str:
             rec = store.add(chunk, category=f"Knowledge/AI/{category}", source="https://peake-ai.onrender.com/")
             if rec and getattr(store, "ftp_configured", False):
                 try:
+                    print(
+                        f"📤 FTP upload: host={store.ftp_host} user={store.ftp_user} "
+                        f"base_dir={store.ftp_base_dir or '/'} note={len(chunk)} chars"
+                    )
                     store.upload(rec)
                 except Exception as exc:
                     print(f"⚠️ AI chat FTP upload failed: {exc}")
+                    rec = None
             record = rec
         except Exception as exc:
             print(f"⚠️ AI chat memory save failed: {exc}")
@@ -3957,7 +3962,7 @@ def _ftp_connect_for_upload(timeout: float = 20.0, attempts: int = 3) -> FTP:
             if attempt + 1 < attempts:
                 time.sleep(min(8, 2 ** attempt))
     raise RuntimeError(
-        f"FTP connect/login failed after {attempts} attempt(s): {type(last_error).__name__}"
+        f"FTP connect/login failed after {attempts} attempt(s): {type(last_error).__name__}: {last_error}"
     ) from last_error
 
 
