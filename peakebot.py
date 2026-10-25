@@ -26,7 +26,7 @@ from my_ai.conversation import (
     research_answer_system_prompt,
 )
 from my_ai.math_learner import MathLearner
-from my_ai.memory_store import MemoryStore
+from my_ai.memory_store import MemoryStore, _MAX_NOTE_CHARS
 from my_ai.trading_bridge import TradingBridge
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus, urlparse
@@ -3229,21 +3229,36 @@ def _store_ai_chat(prompt: str, response: str, provider: str) -> str:
     category = _categorize_chat(prompt, response)
     store = _get_mcf_memory_store()
     note = f"[{provider}] {response}"
-    try:
-        record = store.add(
-            note, category=f"Knowledge/AI/{category}", source="https://peake-ai.onrender.com/"
-        )
-    except Exception as exc:
-        print(f"⚠️ AI chat memory save failed: {exc}")
-        record = None
+    record = None
+    # AI notes can be any length; split into <=500-char chunks like import_text,
+    # so long responses still persist instead of failing validation.
+    chunks = []
+    text = note.strip()
+    if text:
+        while len(text) > _MAX_NOTE_CHARS:
+            split_pt = text.rfind(". ", 0, _MAX_NOTE_CHARS)
+            if split_pt == -1:
+                split_pt = text.rfind(" ", 0, _MAX_NOTE_CHARS)
+            if split_pt == -1:
+                split_pt = _MAX_NOTE_CHARS
+            chunks.append(text[:split_pt].strip())
+            text = text[split_pt:].strip(". ")
+        if text:
+            chunks.append(text)
+    for chunk in chunks:
+        try:
+            rec = store.add(chunk, category=f"Knowledge/AI/{category}", source="https://peake-ai.onrender.com/")
+            if rec and getattr(store, "ftp_configured", False):
+                try:
+                    store.upload(rec)
+                except Exception as exc:
+                    print(f"⚠️ AI chat FTP upload failed: {exc}")
+            record = rec
+        except Exception as exc:
+            print(f"⚠️ AI chat memory save failed: {exc}")
     storage = "saved locally"
     if record and getattr(store, "ftp_configured", False):
-        try:
-            store.upload(record)
-            storage = "saved to shared MCF3/FTP memory"
-        except Exception as exc:
-            print(f"⚠️ AI chat FTP upload failed: {exc}")
-            storage = "saved locally (FTP upload failed)"
+        storage = "saved to shared MCF3/FTP memory"
     elif not getattr(store, "ftp_configured", False):
         storage = "saved locally (FTP not configured)"
 
