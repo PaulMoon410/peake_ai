@@ -27,6 +27,7 @@ from my_ai.conversation import (
 )
 from my_ai.math_learner import MathLearner
 from my_ai.memory_store import MemoryStore, _MAX_NOTE_CHARS
+from my_ai.memory_organizer import sync_and_organize, HttpRecallCoordinator, organize_memory
 from my_ai.trading_bridge import TradingBridge
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus, urlparse
@@ -751,6 +752,45 @@ def _flush_online_learning(force: bool = False):
         profile["last_online_learning"] = datetime.now().isoformat()
         _save_json_file(GROWTH_PROFILE_FILE, profile)
         print(f"🧠 Online learning updated model with {learned} high-quality interaction(s)")
+
+    # Memory organization runs in the background so chat turns are never blocked.
+    # It deduplicates, re-categorizes, consolidates, and builds an organized
+    # knowledge base on the FTP ``Harold`` directory, with an HTTP cross-check
+    # running concurrently against peake-ai's own API.
+    try:
+        _start_memory_organizer()
+    except Exception as exc:
+        print(f"⚠️ Memory organizer not started: {exc}")
+
+
+def _start_memory_organizer() -> None:
+    """Kick off the memory organizer on a background thread (once per process)."""
+    global _ORGANIZER_STARTED
+    with _ORGANIZER_LOCK:
+        if _ORGANIZER_STARTED:
+            return
+        _ORGANIZER_STARTED = True
+
+    def run() -> None:
+        try:
+            store = _get_mcf_memory_store()
+            http = HttpRecallCoordinator()
+            report = sync_and_organize(store, force=False, http=http)
+            print(
+                f"📚 Memory organizer: {report['deduplicated']} deduped, "
+                f"{report['re_categorized']} re-categorized, "
+                f"{report['consolidated']} consolidated, "
+                f"kb={'yes' if report['knowledge_base_written'] else 'no'}, "
+                f"http={'up' if report['http_available'] else 'down'}"
+            )
+        except Exception as exc:
+            print(f"⚠️ Memory organizer run failed: {type(exc).__name__}: {exc}")
+
+    threading.Thread(target=run, name="memory-organizer", daemon=True).start()
+
+
+_ORGANIZER_STARTED = False
+_ORGANIZER_LOCK = threading.Lock()
 
 
 def _knowledge_file_sort_key(filename: str):
@@ -2709,6 +2749,31 @@ def _handle_gutenberg_request(prompt: str) -> str | None:
         return f"I couldn't save Gutenberg book #{book_id} to memory right now."
 
 
+def _handle_organize_request(prompt: str) -> str | None:
+    """Handle 'organize memory' requests: deduplicate, re-categorize,
+    consolidate, and build an organized knowledge base on the FTP Harold dir."""
+    pl = prompt.strip().lower()
+    if not pl.startswith(("organize memory", "organise memory", "organize my memory", "reorganize memory")):
+        return None
+
+    store = _get_mcf_memory_store()
+    http = HttpRecallCoordinator()
+    try:
+        report = sync_and_organize(store, force=True, http=http)
+        kb_status = "written" if report["knowledge_base_written"] else "skipped"
+        http_status = "up" if report["http_available"] else "down"
+        cats = ", ".join(f"{c}:{b['knowledge']} notes" for c, b in sorted(report["categories"].items())[:5])
+        return (
+            f"Memory organized ({report['deduplicated']} deduped, "
+            f"{report['re_categorized']} re-categorized, "
+            f"{report['consolidated']} consolidated). "
+            f"Knowledge base {kb_status} to FTP ``{HAROLD_FTP_DIR}`` directory. "
+            f"HTTP cross-check {http_status}. Categories: {cats}."
+        )
+    except Exception as exc:
+        return f"Memory organization failed: {type(exc).__name__}: {exc}"
+
+
 def _learn_from_sources(topic: str, urls: list[str]) -> str:
     """Read up to four public pages, save cited excerpts, and compare passages."""
     try:
@@ -3251,8 +3316,8 @@ def _store_ai_chat(prompt: str, response: str, provider: str) -> str:
             if rec and getattr(store, "ftp_configured", False):
                 try:
                     print(
-                        f"📤 FTP upload: host={store.ftp_host} user={store.ftp_user} "
-                        f"base_dir={store.ftp_base_dir or '/'} note={len(chunk)} chars"
+                        f"📤 FTP upload: host={getattr(store, 'ftp_host', '?')} user={getattr(store, 'ftp_user', '?')} "
+                        f"base_dir={getattr(store, 'ftp_base_dir', None) or '/'} note={len(chunk)} chars"
                     )
                     store.upload(rec)
                 except Exception as exc:
@@ -3645,6 +3710,10 @@ def generate_response(prompt, conversation_history=None):
     if gutenberg_response is not None:
         remember(raw_prompt, gutenberg_response)
         return gutenberg_response
+
+    organize_response = _handle_organize_request(raw_prompt)
+    if organize_response is not None:
+        return organize_response
 
     math_response = _handle_math_request(raw_prompt)
     if math_response is not None:

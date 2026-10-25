@@ -547,7 +547,7 @@ class AIProviderTests(unittest.TestCase):
             storage = peakebot._store_ai_chat("what is python?", "Python is a programming language.", "openai")
 
         self.assertIn("programming", saved["category"])
-        self.assertEqual(saved["source"], "ai:openai")
+        self.assertEqual(saved["source"], "https://peake-ai.onrender.com/")
         self.assertIn("FTP", storage)
 
 

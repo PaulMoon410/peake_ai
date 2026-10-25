@@ -26,6 +26,7 @@ from peakebot import (
   trading_summary,
 )
 from my_ai.integrations.integration_manager import IntegrationManager
+from my_ai.memory_organizer import sync_and_organize, HttpRecallCoordinator
 
 app = Flask(__name__)
 
@@ -758,6 +759,27 @@ def admin_archive_sync() -> Response:
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify({"ok": bool(report.get("ok")), "report": report})
+
+
+@app.post("/api/admin/organize-memory")
+def admin_organize_memory() -> Response:
+    """Force a memory organization pass: deduplicate, re-categorize, consolidate,
+    and build an organized knowledge base on the FTP ``Harold`` directory."""
+    ok, error = _admin_enabled_and_configured()
+    if not ok:
+        return error, 503
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_admin_rate_limit(client_ip):
+        return jsonify({"error": "admin rate limit exceeded"}), 429
+    if not _is_admin_authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        store = _get_mcf_memory_store()
+        http = HttpRecallCoordinator()
+        report = sync_and_organize(store, force=True, http=http)
+        return jsonify({"ok": True, "report": report})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.get("/api/admin/ftp-status")
