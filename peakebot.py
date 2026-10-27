@@ -2383,6 +2383,14 @@ _WEATHER_FOLLOWUP_RE = re.compile(
     r"^(?:what about|how about|and|also|in)\s+(.+?)[.!?\s]*$",
     re.IGNORECASE,
 )
+_CODE_GENERATION_RE = re.compile(
+    r"^(?:please\s+)?(?:write|create|generate|make|build|code)\s+(?:(?:a|an|some)?\s*)?(?:python|javascript|js|bash|shell|sh|html|css|sql|go|rust|java|c\+\+|cpp|ruby|php|typescript|ts)\s+(?:(?:script|program|code|app|application|module|function|class|tool|utility|bot))?\s*(?:(?:for|to|that|which|with|about))\s*(.+?)[.!?\s]*$",
+    re.IGNORECASE,
+)
+_CODE_GENERATION_SHORT_RE = re.compile(
+    r"^(?:please\s+)?(?:write|create|generate|make|build|code)\s+(.+?)[.!?\s]*$",
+    re.IGNORECASE,
+)
 _CLOCK_REQUEST_RE = re.compile(
     r"^(?:please\s+)?(?:what(?:'s| is)\s+(?:the\s+)?(?:current\s+)?time\s+(?:in|at|for)|"
     r"time\s+(?:in|at|for)|clock\s+(?:in|at|for))\s+(.+?)[.!?\s]*$",
@@ -2558,6 +2566,115 @@ def _handle_weather_followup_request(prompt: str, history: list) -> str | None:
         return None
     fake_prompt = f"weather in {location}"
     return _handle_weather_request(fake_prompt)
+
+
+_CODE_LANGUAGE_MAP = {
+    "python": "py", "py": "py",
+    "javascript": "js", "js": "js",
+    "bash": "sh", "shell": "sh", "sh": "sh",
+    "html": "html", "css": "css",
+    "sql": "sql", "go": "go", "rust": "rs",
+    "java": "java", "cpp": "cpp", "c++": "cpp",
+    "ruby": "rb", "php": "php",
+    "typescript": "ts", "ts": "ts",
+}
+
+
+def _extract_code_blocks(text: str) -> list[tuple[str, str]]:
+    """Extract fenced code blocks from AI output. Returns list of (language, code)."""
+    blocks: list[tuple[str, str]] = []
+    pattern = re.compile(r"```(\w+)?\n(.*?)\n```", re.DOTALL)
+    for match in pattern.finditer(text):
+        lang = (match.group(1) or "text").strip().lower()
+        code = match.group(2).strip()
+        if code:
+            blocks.append((lang, code))
+    return blocks
+
+
+def _upload_code_to_ftp(filename: str, code: str) -> str | None:
+    """Upload generated code to FTP and return the remote path, or None on failure."""
+    if not _ftp_model_credentials_configured():
+        return None
+    try:
+        ftp = _ftp_connect_for_upload()
+        try:
+            base_dir = _resolved_ftp_base_dir().strip("/")
+            remote_name = f"{base_dir}/{filename}" if base_dir else filename
+            data = code.encode("utf-8")
+            import io as _io
+            _ftp_store_binary(ftp, remote_name, _io.BytesIO(data))
+            return remote_name
+        finally:
+            try:
+                ftp.quit()
+            except Exception:
+                pass
+    except Exception as exc:
+        print(f"⚠️ Code upload to FTP failed: {type(exc).__name__}: {exc}")
+        return None
+
+
+def _handle_code_generation_request(prompt: str) -> str | None:
+    """Generate code via AI provider, upload to FTP, return download info."""
+    stripped = prompt.strip()
+    match = _CODE_GENERATION_RE.fullmatch(stripped)
+    if not match:
+        match = _CODE_GENERATION_SHORT_RE.fullmatch(stripped)
+        if not match:
+            return None
+        description = match.group(1).strip()
+    else:
+        description = match.group(1).strip()
+
+    if not description or len(description) < 3:
+        return None
+
+    # Detect language from description or default to python
+    lang = "python"
+    for key, ext in _CODE_LANGUAGE_MAP.items():
+        if key in description.lower():
+            lang = key
+            break
+
+    system = (
+        "You are Harold, an expert programmer. Write clean, working, well-commented "
+        "code in a single fenced code block with the language tag. Do not add "
+        "explanatory prose outside the code block. Only output the code block."
+    )
+    user = f"Write {lang} code for: {description}"
+
+    result = _ai_chat_completion(user, "")
+    answer = result.get("answer")
+    if not answer:
+        return None
+
+    blocks = _extract_code_blocks(answer)
+    if not blocks:
+        # Fallback: treat the whole answer as code if it looks like code
+        if any(c in answer for c in ["def ", "function ", "print(", "console.log", "import ", "class "]):
+            blocks = [(lang, answer.strip())]
+        else:
+            return None
+
+    code_lang, code = blocks[0]
+    ext = _CODE_LANGUAGE_MAP.get(code_lang, "txt")
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-]+", "_", description.strip()).strip("_")[:40]
+    if not safe_name:
+        safe_name = "generated_code"
+    filename = f"{safe_name}.{ext}"
+
+    remote_path = _upload_code_to_ftp(filename, code)
+    if not remote_path:
+        return f"Generated code but could not upload to FTP. FTP may not be configured.\n\n```{code_lang}\n{code}\n```"
+
+    provider = result.get("provider") or "unknown"
+    return (
+        f"Generated `{filename}` ({code_lang}) and saved to FTP at `{remote_path}`.\n"
+        f"Download it from the web app under Code → Downloads.\n\n"
+        f"(Answered via {provider}.)"
+    )
+
 
 
 def _handle_clock_request(prompt: str) -> str | None:
@@ -3983,6 +4100,11 @@ def generate_response(prompt, conversation_history=None):
     if weather_followup_response is not None:
         remember(raw_prompt, weather_followup_response)
         return weather_followup_response
+
+    code_response = _handle_code_generation_request(raw_prompt)
+    if code_response is not None:
+        remember(raw_prompt, code_response)
+        return code_response
 
     clock_response = _handle_clock_request(raw_prompt)
     if clock_response is not None:

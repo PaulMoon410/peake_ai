@@ -1,7 +1,9 @@
 import os
+import re
 import threading
 import time
 import hmac
+import ftplib
 from collections import defaultdict, deque
 from typing import Optional, Tuple
 from datetime import datetime, timedelta
@@ -10,6 +12,10 @@ from my_ai.conversation import normalize_history
 
 from peakebot import (
   _get_mcf_memory_store,
+  _ftp_connect_for_upload,
+  _ftp_store_binary,
+  _resolved_ftp_base_dir,
+  _handle_code_generation_request,
   warm_language_model,
   generate_response,
   add_base_knowledge_entry,
@@ -325,6 +331,20 @@ def index() -> Response:
     </div>
     <div id=\"queue-status\" aria-live=\"polite\">Ready.</div>
     <div class=\"hint\">Messages are sent in order. “Steer next” prioritizes guidance after Harold's current reply; it cannot change text already being generated. Avoid sensitive data.</div>
+
+    <div id=\"code-panel\" style=\"border-top:1px solid #1f2937; padding:12px; background:#0b1020; display:none;\">
+      <div style=\"margin-bottom:8px; font-weight:700; color:#22c55e;\">Code Generator</div>
+      <div style=\"margin-bottom:8px;\">
+        <textarea id=\"codePrompt\" placeholder=\"e.g. write a python script to scrape a website...\"></textarea>
+      </div>
+      <div style=\"margin-bottom:8px; gap:8px; display:flex; align-items:center;\">
+        <button id=\"codeGenBtn\">Generate & Upload to FTP</button>
+        <button id=\"codeListBtn\">List FTP Files</button>
+        <span id=\"codeStatus\" style=\"font-size:12px; color:#9ca3af; margin-left:8px;\"></span>
+      </div>
+      <pre id=\"codeOutput\" style=\"background:#111827; border:1px solid #374151; border-radius:8px; padding:10px; font-size:13px; max-height:300px; overflow:auto;\"></pre>
+      <div id=\"codeDownloads\" style=\"margin-top:8px;\"></div>
+    </div>
   </div>
   <script>
     const log = document.getElementById('log');
@@ -430,6 +450,88 @@ def index() -> Response:
         enqueuePrompt(false);
       }
     });
+
+    // Code generator
+    const codePanel = document.getElementById('code-panel');
+    const codePrompt = document.getElementById('codePrompt');
+    const codeGenBtn = document.getElementById('codeGenBtn');
+    const codeListBtn = document.getElementById('codeListBtn');
+    const codeStatus = document.getElementById('codeStatus');
+    const codeOutput = document.getElementById('codeOutput');
+    const codeDownloads = document.getElementById('codeDownloads');
+
+    codeGenBtn.addEventListener('click', async () => {
+      const prompt = codePrompt.value.trim();
+      if (!prompt) return;
+      codeGenBtn.disabled = true;
+      codeStatus.textContent = 'Generating...';
+      codeOutput.textContent = '';
+      codeDownloads.innerHTML = '';
+      try {
+        const res = await fetch('/api/code/generate', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({prompt, history: conversationHistory.slice(-12)})
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          codeOutput.textContent = 'Error: ' + (data.error || 'Request failed');
+          codeStatus.textContent = '';
+        } else {
+          codeOutput.textContent = data.response || 'No response';
+          codeStatus.textContent = 'Done.';
+          // Auto-refresh downloads
+          listCodeDownloads();
+        }
+      } catch (err) {
+        codeOutput.textContent = 'Network error: ' + err.message;
+        codeStatus.textContent = '';
+      } finally {
+        codeGenBtn.disabled = false;
+      }
+    });
+
+    codeListBtn.addEventListener('click', listCodeDownloads);
+
+    async function listCodeDownloads() {
+      codeStatus.textContent = 'Listing FTP files...';
+      codeDownloads.innerHTML = '';
+      try {
+        const res = await fetch('/api/code/list', {
+          method: 'GET'
+        });
+        if (!res.ok) {
+          codeDownloads.innerHTML = '<div style=\"color:#ef4444;\">Could not list FTP files.</div>';
+          codeStatus.textContent = '';
+          return;
+        }
+        const data = await res.json();
+        const files = data.files || [];
+        if (files.length === 0) {
+          codeDownloads.innerHTML = '<div style=\"color:#9ca3af; font-size:12px;\">No files on FTP.</div>';
+        } else {
+          const ul = document.createElement('ul');
+          ul.style.margin = '4px 0 0 0';
+          ul.style.paddingLeft = '16px';
+          for (const f of files) {
+            const li = document.createElement('li');
+            li.style.marginBottom = '4px';
+            li.style.fontSize = '13px';
+            const a = document.createElement('a');
+            a.href = '/api/code/download/' + encodeURIComponent(f);
+            a.textContent = f;
+            a.target = '_blank';
+            li.appendChild(a);
+            ul.appendChild(li);
+          }
+          codeDownloads.appendChild(ul);
+        }
+        codeStatus.textContent = '';
+      } catch (err) {
+        codeDownloads.innerHTML = '<div style=\"color:#ef4444;\">Network error.</div>';
+        codeStatus.textContent = '';
+      }
+    }
 
     addLine('b', 'Harold: Online. Ask me anything.');
   </script>
@@ -1035,6 +1137,132 @@ def api_trading_summary() -> Response:
         return jsonify(trading_summary())
     except Exception as exc:
         return jsonify({"error": f"trading summary failed: {exc}"}), 500
+
+
+# -- code generation endpoints ----------------------------------------------
+@app.get("/api/code/list")
+def api_code_list() -> Response:
+    """List files in the FTP code directory."""
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_rate_limit(client_ip):
+        return jsonify({"error": "rate limit exceeded; try again shortly"}), 429
+
+    if not _ftp_model_credentials_configured():
+        return jsonify({"error": "FTP is not configured"}), 503
+
+    try:
+        ftp = _ftp_connect_for_upload()
+        try:
+            base_dir = _resolved_ftp_base_dir().strip("/")
+            files = []
+            try:
+                entries = ftp.nlst(base_dir or ".")
+                for entry in entries:
+                    name = entry.rsplit("/", 1)[-1]
+                    if name and not name.startswith("."):
+                        files.append(name)
+            except ftplib.all_errors:
+                pass
+            return jsonify({"files": sorted(files)})
+        finally:
+            try:
+                ftp.quit()
+            except Exception:
+                pass
+    except Exception as exc:
+        return jsonify({"error": f"FTP list failed: {exc}"}), 500
+
+
+@app.post("/api/code/generate")
+def api_code_generate() -> Response:
+    """Ask Harold to generate code and upload it to FTP for download."""
+    payload = request.get_json(silent=True) or {}
+    prompt = str(payload.get("prompt", "")).strip()
+    if not prompt:
+        return jsonify({"error": "prompt is required"}), 400
+
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_rate_limit(client_ip):
+        return jsonify({"error": "rate limit exceeded; try again shortly"}), 429
+
+    history = normalize_history(payload.get("history", []))
+
+    try:
+        response = _handle_code_generation_request(prompt)
+    except Exception as exc:
+        return jsonify({"error": f"code generation failed: {exc}"}), 500
+
+    if not response:
+        return jsonify({"error": "I didn't understand that as a code request. Try: 'write a python script to ...'"}), 400
+
+    remember = None
+    try:
+        from peakebot import remember as _remember
+        _remember(prompt, response)
+    except Exception:
+        pass
+
+    return jsonify({"response": response})
+
+
+@app.get("/api/code/download/<filename>")
+def api_code_download(filename: str) -> Response:
+    """Download a generated code file from FTP."""
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_rate_limit(client_ip):
+        return jsonify({"error": "rate limit exceeded; try again shortly"}), 429
+
+    if not _ftp_model_credentials_configured():
+        return jsonify({"error": "FTP is not configured"}), 503
+
+    # Sanitize filename to prevent path traversal
+    safe_name = re.sub(r"[^a-zA-Z0-9_.\-]", "_", filename)
+    if safe_name != filename:
+        return jsonify({"error": "invalid filename"}), 400
+
+    try:
+        ftp = _ftp_connect_for_upload()
+        try:
+            base_dir = _resolved_ftp_base_dir().strip("/")
+            remote_name = f"{base_dir}/{safe_name}" if base_dir else safe_name
+            import io as _io
+            buf = _io.BytesIO()
+            ftp.retrbinary(f"RETR {remote_name}", buf.write)
+            buf.seek(0)
+            data = buf.read()
+        finally:
+            try:
+                ftp.quit()
+            except Exception:
+                pass
+
+        ext = safe_name.rsplit(".", 1)[-1] if "." in safe_name else "txt"
+        mime_map = {
+            "py": "text/x-python",
+            "js": "application/javascript",
+            "sh": "text/x-shellscript",
+            "html": "text/html",
+            "css": "text/css",
+            "sql": "text/sql",
+            "go": "text/x-go",
+            "rs": "text/x-rust",
+            "java": "text/x-java",
+            "cpp": "text/x-c++src",
+            "rb": "text/x-ruby",
+            "php": "text/x-php",
+            "ts": "application/typescript",
+            "txt": "text/plain",
+        }
+        mime = mime_map.get(ext, "application/octet-stream")
+        return Response(
+            data,
+            mimetype=mime,
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+        )
+    except ftplib.all_errors as exc:
+        return jsonify({"error": f"FTP download failed: {exc}"}), 500
+    except Exception as exc:
+        return jsonify({"error": f"download failed: {exc}"}), 500
 
 
 if __name__ == "__main__":
