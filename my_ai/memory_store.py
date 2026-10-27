@@ -17,8 +17,14 @@ import ssl
 import tempfile
 import threading
 import time
+import zlib
 from urllib.parse import urlsplit
 import uuid
+
+try:
+    from my_ai.mcf4 import _HEADER, encode_record as _mcf4_encode_record, decode_record as _mcf4_decode_record, encode_shard as _mcf4_encode_shard, decode_shard as _mcf4_decode_shard
+except ImportError:
+    from mcf4 import _HEADER, encode_record as _mcf4_encode_record, decode_record as _mcf4_decode_record, encode_shard as _mcf4_encode_shard, decode_shard as _mcf4_decode_shard
 
 
 _WORDS = re.compile(r"[^\W_]+", re.UNICODE)
@@ -383,6 +389,14 @@ class MemoryStore:
             raise ValueError("MEMORY_FTP_PATH must be a safe remote file path without '..' segments.")
         if any(part in {".", ".."} for part in self.ftp_base_dir.split("/") if part):
             raise ValueError("MEMORY_FTP_BASE_DIR must not contain relative path segments.")
+        # Storage format: "json" (legacy JSONL) or "mcf4" (compact pipe-delimited).
+        # MCF4 is ~27% smaller per record and is the recommended format for new
+        # archives; JSON remains the default for backward compatibility.
+        self.format = os.environ.get("MEMORY_FORMAT", "json").strip().lower()
+        if self.format not in {"json", "mcf4"}:
+            raise ValueError("MEMORY_FORMAT must be 'json' or 'mcf4'.")
+        # Compress FTP shards with zlib (saves bandwidth and remote disk).
+        self.compress_shards = os.environ.get("MEMORY_COMPRESS", "").strip().lower() in {"1", "true", "yes", "on"}
         # Chat threads may recall while another thread saves; serialise writes.
         self._lock = threading.RLock()
         self._mesh_lock = threading.RLock()
@@ -534,22 +548,33 @@ class MemoryStore:
         records: list[dict[str, str]] = []
         try:
             with self.path.open("r", encoding="utf-8") as source:
+                first = True
+                use_mcf4 = None
                 for line in source:
-                    try:
-                        value = json.loads(line)
-                    except (json.JSONDecodeError, UnicodeDecodeError):
+                    if first:
+                        first = False
+                        use_mcf4 = line.startswith("MCF4 ")
+                    record = None
+                    if use_mcf4:
+                        record = _mcf4_decode_record(line)
+                    else:
+                        try:
+                            value = json.loads(line)
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            continue
+                        record = value if self._valid_record(value) else None
+                    if record is None:
                         continue
-                    if self._valid_record(value):
-                        note = self._normalize_note(value["n"])
-                        category = str(value.get("c", "Knowledge"))
-                        source_url = str(value.get("s", ""))
-                        if len(source_url) > 500 or not source_url.startswith(("https://", "http://")):
-                            source_url = ""
-                        records.append(self._normalize_record({
-                            "i": value["i"], "d": str(value.get("d", "")), "c": category,
-                            "k": str(value.get("k", self._keywords(note, category))), "n": note,
-                            "s": source_url, "l": str(value.get("l", "")),
-                        }))
+                    note = self._normalize_note(record["n"])
+                    category = str(record.get("c", "Knowledge"))
+                    source_url = str(record.get("s", ""))
+                    if len(source_url) > 500 or not source_url.startswith(("https://", "http://")):
+                        source_url = ""
+                    records.append(self._normalize_record({
+                        "i": record["i"], "d": str(record.get("d", "")), "c": category,
+                        "k": str(record.get("k", self._keywords(note, category))), "n": note,
+                        "s": source_url, "l": str(record.get("l", "")),
+                    }))
         except OSError:
             return []
         return self._deduplicate(records)
@@ -596,8 +621,13 @@ class MemoryStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.path.with_name(self.path.name + ".tmp")
             with temporary.open("w", encoding="utf-8", newline="\n") as output:
+                if self.format == "mcf4":
+                    output.write(_HEADER)
                 for record in self.records:
-                    output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+                    if self.format == "mcf4":
+                        output.write(_mcf4_encode_record(record))
+                    else:
+                        output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
             os.replace(temporary, self.path)
 
     def _add_to_index(self, record: dict[str, str]) -> None:
@@ -801,22 +831,35 @@ class MemoryStore:
         if not self.ftp_configured:
             return
         remote_records = [record for record in self._read_remote_records() if record["i"] != removed_id]
-        payloads = [self._encode_record(record) for record in remote_records]
         client = self._connect()
         try:
             old_sizes = self._remote_shard_sizes(client)
-            grouped: list[bytes] = []
-            current = bytearray()
-            for payload in payloads:
+            # Encode records per store format and group by shard cap.
+            encoded: list[bytes] = []
+            for record in remote_records:
+                if self.format == "mcf4":
+                    payload = _mcf4_encode_record(record).encode("utf-8")
+                else:
+                    payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
                 if len(payload) > self.max_remote_bytes:
                     raise RuntimeError("A memory record is larger than the configured FTP file limit.")
+                encoded.append(payload)
+
+            grouped: list[bytes] = []
+            current = bytearray()
+            for payload in encoded:
                 if current and len(current) + len(payload) > self.max_remote_bytes:
                     grouped.append(bytes(current))
                     current.clear()
                 current.extend(payload)
             if current or not grouped:
                 grouped.append(bytes(current))
+
             for index, contents in enumerate(grouped):
+                if self.format == "mcf4" and index == 0:
+                    contents = _HEADER.encode("utf-8") + contents
+                if self.compress_shards:
+                    contents = zlib.compress(contents, level=6)
                 _ftp_store_binary(client, "STOR " + self._remote_shard_path(index), io.BytesIO(contents))
             for index in range(len(grouped), len(old_sizes)):
                 try:
@@ -1037,24 +1080,38 @@ class MemoryStore:
                 raise
 
             shard_sizes.append(file_size)
-            for raw_line in b"".join(chunks).splitlines():
-                if len(raw_line) > _MAX_RECORD_BYTES:
-                    continue
+            raw_data = b"".join(chunks)
+            if self.compress_shards:
                 try:
-                    value = json.loads(raw_line.decode("utf-8"))
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                    raw_data = zlib.decompress(raw_data)
+                except zlib.error:
+                    # Not compressed; fall back to raw bytes.
+                    pass
+            text = raw_data.decode("utf-8")
+            use_mcf4 = None
+            for raw_line in text.splitlines():
+                if use_mcf4 is None:
+                    use_mcf4 = raw_line.startswith("MCF4 ")
+                    if use_mcf4:
+                        continue
+                record = _mcf4_decode_record(raw_line) if use_mcf4 else None
+                if record is None and not use_mcf4:
+                    try:
+                        value = json.loads(raw_line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    record = value if self._valid_record(value) else None
+                if record is None:
                     continue
-                if not self._valid_record(value):
-                    continue
-                note = self._normalize_note(value["n"])
-                category = str(value.get("c", "Knowledge"))
-                source_url = str(value.get("s", ""))
+                note = self._normalize_note(record["n"])
+                category = str(record.get("c", "Knowledge"))
+                source_url = str(record.get("s", ""))
                 if len(source_url) > 500 or not source_url.startswith(("https://", "http://")):
                     source_url = ""
                 remote_records.append(self._normalize_record({
-                    "i": value["i"], "d": str(value.get("d", "")), "c": category,
-                    "k": str(value.get("k", self._keywords(note, category))), "n": note,
-                    "s": source_url, "l": str(value.get("l", "")),
+                    "i": record["i"], "d": str(record.get("d", "")), "c": category,
+                    "k": str(record.get("k", self._keywords(note, category))), "n": note,
+                    "s": source_url, "l": str(record.get("l", "")),
                 }))
         else:
             raise RuntimeError(f"FTP memory contains at least {_MAX_REMOTE_SHARDS} files; refusing an unbounded scan.")
@@ -1772,7 +1829,15 @@ class MemoryStore:
 
     @staticmethod
     def _encode_record(record: dict[str, str]) -> bytes:
+        """Serialize one record to bytes, using MCF4 or JSON per store config."""
         payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(payload) > _MAX_RECORD_BYTES:
+            raise RuntimeError(f"Memory record exceeds the {_MAX_RECORD_BYTES}-byte upload limit.")
+        return payload
+
+    def _encode_record_mcf4(self, record: dict[str, str]) -> bytes:
+        """Serialize one record as MCF4 bytes."""
+        payload = (_mcf4_encode_record(record)).encode("utf-8")
         if len(payload) > _MAX_RECORD_BYTES:
             raise RuntimeError(f"Memory record exceeds the {_MAX_RECORD_BYTES}-byte upload limit.")
         return payload
@@ -1806,21 +1871,37 @@ class MemoryStore:
         return sizes
 
     def _append_payloads(
-        self, client: ftplib.FTP, payloads: list[bytes], shard_sizes: list[int] | None = None,
+        self, client: ftplib.FTP, records: list[dict[str, str]], shard_sizes: list[int] | None = None,
     ) -> None:
-        """Preflight and append records, rotating to new files at the per-file cap."""
-        if not payloads:
+        """Preflight and append records, rotating to new files at the per-file cap.
+
+        Records are encoded per ``self.format`` (JSONL or MCF4) and, when
+        ``self.compress_shards`` is true, each shard is zlib-compressed before
+        upload.  New shards (STOR) get an MCF4 version header when the format
+        is MCF4.
+        """
+        if not records:
             return
         if shard_sizes is None:
             shard_sizes = self._remote_shard_sizes(client)
         original_count = len(shard_sizes)
         sizes = list(shard_sizes)
-        groups: list[tuple[int, list[bytes]]] = []
-        for payload in payloads:
+
+        # Encode all records up front so we can preflight sizes before any upload.
+        encoded: list[bytes] = []
+        for record in records:
+            if self.format == "mcf4":
+                payload = _mcf4_encode_record(record).encode("utf-8")
+            else:
+                payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
             if len(payload) > self.max_remote_bytes:
                 raise RuntimeError(
                     f"A memory record is larger than the configured {self.max_remote_bytes}-byte FTP file limit."
                 )
+            encoded.append(payload)
+
+        groups: list[tuple[int, list[bytes]]] = []
+        for payload in encoded:
             index = max(0, len(sizes) - 1)
             size = sizes[index] if sizes else 0
             if sizes and size + len(payload) > self.max_remote_bytes:
@@ -1836,21 +1917,33 @@ class MemoryStore:
                 sizes.append(0)
             sizes[index] = size + len(payload)
 
-        # All records fit before the first remote write is attempted.
+        # Build the full shard content per group, applying compression and headers.
+        shard_contents: dict[int, bytes] = {}
         for index, group in groups:
+            chunks = b"".join(group)
+            if self.format == "mcf4" and index >= original_count:
+                # New shard: prepend version header.
+                chunks = _HEADER.encode("utf-8") + chunks
+            if self.compress_shards:
+                chunks = zlib.compress(chunks, level=6)
+            shard_contents[index] = chunks
+
+        for index, contents in shard_contents.items():
             command = "APPE " if index < original_count else "STOR "
-            payload_bytes = b"".join(group)
             shard_path = self._remote_shard_path(index)
             try:
-                _ftp_store_binary(client, command + shard_path, io.BytesIO(payload_bytes))
+                _ftp_store_binary(client, command + shard_path, io.BytesIO(contents))
             except ftplib.all_errors as exc:
                 if not command.strip().upper().startswith("APPE"):
                     raise
-                # Some FTP servers (e.g. Geocities) reject APPE with
-                # "451 Append/Restart not permitted". Fall back to downloading
-                # the existing shard, appending locally, and STORing it back.
+                # Some FTP servers reject APPE; fall back to download-modify-upload.
                 existing = self._download_shard_bytes(client, shard_path)
-                _ftp_store_binary(client, "STOR " + shard_path, io.BytesIO(existing + payload_bytes))
+                if self.compress_shards:
+                    try:
+                        existing = zlib.decompress(existing)
+                    except zlib.error:
+                        pass
+                _ftp_store_binary(client, "STOR " + shard_path, io.BytesIO(existing + contents))
 
     def _download_shard_bytes(self, client: ftplib.FTP, path: str) -> bytes:
         """Download an entire remote shard into memory for append-then-upload fallback."""
@@ -1878,8 +1971,7 @@ class MemoryStore:
             merged = self._deduplicate(remote_records + self.records)
             remote_added = sum(record["i"] not in {item["i"] for item in self.records} for record in remote_records)
             pending = [record for record in merged if record["i"] not in remote_ids]
-            payloads = [self._encode_record(record) for record in pending]
-            self._append_payloads(client, payloads, shard_sizes)
+            self._append_payloads(client, pending, shard_sizes)
             index = self._build_index_map(merged)
             # The archive index and mesh are accelerators. If either upload fails
             # the notes are already safe, so never fail the whole sync over them.
@@ -1899,7 +1991,7 @@ class MemoryStore:
             self.records = merged[-self.max_local_records:]
             self._write_local()
             self._rebuild_index()
-            return remote_added, len(payloads)
+            return remote_added, len(pending)
         finally:
             try:
                 client.quit()
@@ -1915,8 +2007,7 @@ class MemoryStore:
         failures get a fresh login, so one dropped data port does not silently
         lose a note; permanent replies (bad credentials, quota) raise at once.
         """
-        payloads = [self._encode_record(record) for record in records]
-        if not payloads:
+        if not records:
             return 0, 0
         attempts = max(1, _SYNC_MAX_ATTEMPTS)
         last_error: Exception | None = None
@@ -1924,7 +2015,7 @@ class MemoryStore:
             try:
                 client = self._connect(timeout=timeout)
                 try:
-                    self._append_payloads(client, payloads)
+                    self._append_payloads(client, records)
                     # Refresh the archive lookup index in the same session, or a
                     # freshly deployed instance would re-download every shard it
                     # was just handed before it could answer a question.
@@ -1949,7 +2040,7 @@ class MemoryStore:
                     else:
                         for record in records:
                             self._remote_index[record["i"]] = record
-                return len(payloads), attempt + 1
+                return len(records), attempt + 1
             except ftplib.error_perm:
                 raise
             except (OSError, EOFError, ftplib.error_temp) as exc:
@@ -2140,12 +2231,18 @@ class MemoryStore:
             if node in known
         }
 
-    @staticmethod
-    def _encode_index(index: dict[str, dict[str, str]]) -> bytes:
-        return b"".join(
-            (json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-            for entry in index.values()
-        )
+    def _encode_index(self, index: dict[str, dict[str, str]]) -> bytes:
+        if self.format == "mcf4":
+            lines = [_HEADER] + [_mcf4_encode_record(entry) for entry in index.values()]
+            payload = "".join(lines).encode("utf-8")
+        else:
+            payload = b"".join(
+                (json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+                for entry in index.values()
+            )
+        if self.compress_shards:
+            payload = zlib.compress(payload, level=6)
+        return payload
 
     def _store_remote_index(self, client: ftplib.FTP, index: dict[str, dict[str, str]]) -> None:
         _ftp_store_binary(client, "STOR " + self.remote_index_path, io.BytesIO(self._encode_index(index)))
@@ -2205,25 +2302,38 @@ class MemoryStore:
             if str(exc).startswith("550"):
                 return None
             raise
-        index: dict[str, dict[str, str]] = {}
-        for raw_line in b"".join(chunks).splitlines():
-            if len(raw_line) > _MAX_RECORD_BYTES:
-                continue
+        raw_data = b"".join(chunks)
+        if self.compress_shards:
             try:
-                value = json.loads(raw_line.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                raw_data = zlib.decompress(raw_data)
+            except zlib.error:
+                pass
+        text = raw_data.decode("utf-8")
+        index: dict[str, dict[str, str]] = {}
+        use_mcf4 = None
+        for raw_line in text.splitlines():
+            if use_mcf4 is None:
+                use_mcf4 = raw_line.startswith("MCF4 ")
+                if use_mcf4:
+                    continue
+            record = _mcf4_decode_record(raw_line) if use_mcf4 else None
+            if record is None and not use_mcf4:
+                try:
+                    value = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                record = value if self._valid_record(value) else None
+            if record is None:
                 continue
-            if not self._valid_record(value):
-                continue
-            note = self._normalize_note(value["n"])
-            category = str(value.get("c", "Knowledge"))
-            source_url = str(value.get("s", ""))
+            note = self._normalize_note(record["n"])
+            category = str(record.get("c", "Knowledge"))
+            source_url = str(record.get("s", ""))
             if len(source_url) > 500 or not source_url.startswith(("https://", "http://")):
                 source_url = ""
-            index[value["i"]] = self._normalize_record({
-                "i": value["i"], "d": str(value.get("d", "")), "c": category,
-                "k": str(value.get("k", self._keywords(note, category))), "n": note,
-                "s": source_url, "l": str(value.get("l", "")),
+            index[record["i"]] = self._normalize_record({
+                "i": record["i"], "d": str(record.get("d", "")), "c": category,
+                "k": str(record.get("k", self._keywords(note, category))), "n": note,
+                "s": source_url, "l": str(record.get("l", "")),
             })
         return index
 
