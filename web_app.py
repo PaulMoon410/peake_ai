@@ -1013,12 +1013,19 @@ def api_chat() -> Response:
 
     if prompt.lower().startswith("/selftalk"):
         topic = prompt[len("/selftalk"):].strip() or "general knowledge"
-        try:
+        def run_selftalk():
+            import time
             from my_ai.autonomous_self_talk import PeakeSelfTalkEngine
-            PeakeSelfTalkEngine().execute_self_talk_command(cycles=2, curriculum_topic=topic)
-            return jsonify({"response": f"Self-talk completed on: {topic}"})
-        except Exception as exc:
-            return jsonify({"error": f"self-talk failed: {exc}"}), 500
+            engine = PeakeSelfTalkEngine()
+            end = time.time() + 24*3600
+            while time.time() < end:
+                try:
+                    engine.execute_self_talk_command(cycles=1, curriculum_topic=topic)
+                except Exception as exc:
+                    print(f"[selftalk] {exc}", flush=True)
+                time.sleep(60)
+        threading.Thread(target=run_selftalk, name="selftalk-24h", daemon=True).start()
+        return jsonify({"response": f"Self-talk started for 24h on: {topic}"})
     history = normalize_history(payload.get("history", []))
 
     with _GENERATION_LOCK:
