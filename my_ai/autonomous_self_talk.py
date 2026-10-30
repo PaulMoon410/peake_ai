@@ -299,7 +299,6 @@ class PeakeSelfTalkEngine:
             self.dialogue.add(
                 "learner", answer, topic=topic, provider=answer_turn["provider"],
                 agreement=answer_turn["agreement"], models=answer_turn["answers"],
-                learning_objective=learning_objective
             )
             # Check the answer *after* it is recorded, so the log reads in order.
             critique = self._critique(topic, learning_objective, answer_turn["answers"]) if answer else ""
@@ -324,7 +323,6 @@ class PeakeSelfTalkEngine:
         self.dialogue.add(
             "instructor", question, topic=topic, provider=question_turn["provider"],
             agreement=question_turn["agreement"], models=question_turn["answers"],
-            learning_objective=learning_objective
         )
         
         return {"topic": topic, "question": question, "answer": "", "critique": ""}
