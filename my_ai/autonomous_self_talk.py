@@ -27,7 +27,11 @@ class PeakeSelfTalkEngine:
         if os.path.exists(self.buffer_path):
             with open(self.buffer_path, "r", encoding="utf-8") as f:
                 try:
-                    buffer = json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        buffer = data
+                    elif isinstance(data, dict):
+                        buffer = data.get("facts", []) or []
                 except json.JSONDecodeError:
                     buffer = []
         buffer.append({"timestamp": int(time.time()), "session": "self_talk_autonomous", "extracted_knowledge": fact_text})
