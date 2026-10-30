@@ -4079,6 +4079,61 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
     return result
 
 
+_SELF_TALK_DEFAULT_SYSTEM = "You are Harold, a careful and concise AI assistant. Answer accurately and say when unsure."
+
+
+def _query_ai_providers_for_self_talk(
+    messages: list | str,
+    purpose: str = "consensus",
+    max_providers: int | None = None,
+) -> dict[str, Any]:
+    """Ask every configured AI provider and return *all* answers, for self-talk.
+
+    Unlike ``_ai_chat_completion`` (first success wins), self-talk needs the
+    other models' answers so it can check them against each other.
+
+    ``messages`` is either a plain user string or ``[("system", ...), ("user", ...)]``.
+    ``purpose="single"`` stops at the first answer (critic role); ``"consensus"``
+    collects up to ``SELF_TALK_MAX_MODELS`` answers for cross-checking.
+    """
+    if isinstance(messages, str):
+        system, user = _SELF_TALK_DEFAULT_SYSTEM, messages
+    else:
+        system = " ".join(text for role, text in messages if role == "system").strip() or _SELF_TALK_DEFAULT_SYSTEM
+        user = "\n\n".join(text for role, text in messages if role != "system").strip()
+    limit = max_providers or int(os.getenv("SELF_TALK_MAX_MODELS", "4"))
+
+    result: dict[str, Any] = {"answers": {}, "order": [], "failures": {}}
+    if not user:
+        return result
+    for provider_name, func_name in _ordered_ai_providers():
+        if len(result["answers"]) >= limit:
+            break
+        key_var = {
+            "openai": OPENAI_API_KEY,
+            "openrouter": OPENROUTER_API_KEY,
+            "anthropic": ANTHROPIC_API_KEY,
+            "google": GOOGLE_API_KEY,
+            "groq": GROQ_API_KEY,
+            "deepseek": DEEPSEEK_API_KEY,
+            "mistral": MISTRAL_API_KEY,
+            "perplexity": PERPLEXITY_API_KEY,
+        }.get(provider_name, "")
+        if not key_var:
+            continue
+        try:
+            answer = globals()[func_name](system, user)
+        except Exception as exc:
+            result["failures"][provider_name] = f"{type(exc).__name__}: {str(exc)[:120]}"
+            continue
+        if answer and str(answer).strip():
+            result["answers"][provider_name] = str(answer).strip()
+            result["order"].append(provider_name)
+            if purpose == "single":
+                break
+    return result
+
+
 def generate_response(prompt, conversation_history=None):
     """Answer conversationally, recall MCF3 context, and synthesize web research when needed."""
     raw_prompt = (prompt or "").strip()

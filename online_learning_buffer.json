@@ -27,6 +27,62 @@
       "source": "vscode_agent",
       "quality": 0.9,
       "timestamp": "2026-10-30T16:20:09.616813"
+    },
+    {
+      "prompt": "Self-study (openai) explain: programming: Corroborated.",
+      "response": "programming: Corroborated.",
+      "source": "self_talk_continuous",
+      "quality": 0.65,
+      "timestamp": "2026-10-30T17:51:23.195700"
+    },
+    {
+      "prompt": "Self-study (openai) explain: programming: Corroborated.",
+      "response": "programming: Corroborated.",
+      "source": "self_talk_continuous",
+      "quality": 0.65,
+      "timestamp": "2026-10-30T17:51:23.248501"
+    },
+    {
+      "prompt": "Self-study (openai) explain: physics: Quantum entanglement links particles.",
+      "response": "physics: Quantum entanglement links particles.",
+      "source": "self_talk_continuous",
+      "quality": 0.8,
+      "timestamp": "2026-10-30T17:51:49.707413"
+    },
+    {
+      "prompt": "Self-study (openai) explain: physics: Quantum entanglement links particles.",
+      "response": "physics: Quantum entanglement links particles.",
+      "source": "self_talk_continuous",
+      "quality": 0.8,
+      "timestamp": "2026-10-30T17:51:49.764765"
+    },
+    {
+      "prompt": "Self-study (openai) explain: programming: Alpha fact about x.",
+      "response": "programming: Alpha fact about x.",
+      "source": "self_talk_continuous",
+      "quality": 0.8,
+      "timestamp": "2026-10-30T17:52:18.790317"
+    },
+    {
+      "prompt": "Self-study (openai) explain: quantum physics: Quantum entanglement links particles.",
+      "response": "quantum physics: Quantum entanglement links particles.",
+      "source": "self_talk_continuous",
+      "quality": 0.8,
+      "timestamp": "2026-10-30T17:52:30.911376"
+    },
+    {
+      "prompt": "Self-study (openai) explain: photosynthesis in plants: Photosynthesis converts light to sugar.",
+      "response": "photosynthesis in plants: Photosynthesis converts light to sugar.",
+      "source": "self_talk_continuous",
+      "quality": 0.8,
+      "timestamp": "2026-10-30T17:52:56.321529"
+    },
+    {
+      "prompt": "Self-study (openai) explain: photosynthesis in plants: Photosynthesis converts light to sugar.",
+      "response": "photosynthesis in plants: Photosynthesis converts light to sugar.",
+      "source": "self_talk_continuous",
+      "quality": 0.8,
+      "timestamp": "2026-10-30T17:52:56.373080"
     }
   ]
 }

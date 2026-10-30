@@ -339,6 +339,9 @@ def index() -> Response:
     .u { color: #93c5fd; }
     .b { color: #86efac; }
     .e { color: var(--error); }
+    .st { color: #c4b5fd; opacity: .92; }
+    .st-critic { color: #fbbf24; opacity: .92; font-style: italic; }
+    .st-topic { color: var(--muted); border-top: 1px dashed #374151; padding-top: 6px; margin-top: 6px; }
     .input {
       display: grid;
       grid-template-columns: 1fr auto auto;
@@ -396,7 +399,8 @@ def index() -> Response:
       <button id=\"steer\" title=\"Prioritize this instruction after the current reply\">Steer next</button>
     </div>
     <div id=\"queue-status\" aria-live=\"polite\">Ready.</div>
-    <div class=\"hint\">Messages are sent in order. “Steer next” prioritizes guidance after Harold's current reply; it cannot change text already being generated. Avoid sensitive data.</div>
+    <div class=\"hint\">Messages are sent in order. “Steer next” prioritizes guidance after Harold's current reply; it cannot change text already being generated. Avoid sensitive data.<br />
+    <code>/selftalk [topic]</code> starts the continuous self-study conversation (shown below in purple); <code>/selftalk off</code>, <code>/selftalk status</code>, <code>/selftalk clear</code> control it.</div>
 
     <div id=\"code-panel\" style=\"border-top:1px solid #1f2937; padding:12px; background:#0b1020; display:none;\">
       <div style=\"margin-bottom:8px; font-weight:700; color:#22c55e;\">Code Generator</div>
@@ -433,7 +437,43 @@ def index() -> Response:
       log.scrollTop = log.scrollHeight;
     }
 
-    function updateQueueStatus(activeText = null) {
+    // -- continuous self-talk: tail the shared conversation ------------------
+    const SELF_TALK_POLL_MS = 4000;
+    let selfTalkIndex = 0;
+    let selfTalkTimer = null;
+    let selfTalkTopic = '';
+
+    function renderSelfTalkTurn(turn) {
+      const role = turn.role || '?';
+      if (role === 'system') return;
+      const label = {instructor: 'Instructor', learner: 'Learner', critic: 'Critic'}[role] || role;
+      const topic = turn.topic || '';
+      if (topic && topic !== selfTalkTopic) {
+        selfTalkTopic = topic;
+        addLine('st-topic', `— self-talk topic: ${topic} —`);
+      }
+      const checked = (turn.agreement > 1) ? ` [${turn.agreement} models agree]` : '';
+      const via = turn.provider && role !== 'critic' ? ` (${turn.provider})` : '';
+      addLine(role === 'critic' ? 'st-critic' : 'st', `${label}${via}${checked}: ${turn.text}`);
+    }
+
+    async function pollSelfTalk() {
+      try {
+        const res = await fetch(`/api/selftalk/thread?after=${selfTalkIndex}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        for (const turn of (data.turns || [])) renderSelfTalkTurn(turn);
+        if (typeof data.next === 'number') selfTalkIndex = data.next;
+      } catch (_err) {
+        // Network hiccup: keep the timer alive, the next poll catches up.
+      }
+    }
+
+    function startSelfTalkPolling() {
+      if (selfTalkTimer !== null) return;
+      selfTalkTimer = setInterval(pollSelfTalk, SELF_TALK_POLL_MS);
+      void pollSelfTalk();
+    }
       if (activeText !== null) activeStatus = activeText;
       const pending = messageQueue.length;
       if (processingQueue) {
@@ -489,6 +529,7 @@ def index() -> Response:
               addLine('e', 'Error: ' + (data.error || 'Request failed'));
             } else {
               addLine('b', 'Harold: ' + data.response);
+              if (/^\/selftalk\b/i.test(item.prompt)) startSelfTalkPolling();
               conversationHistory.push(
                 {role: 'user', content: item.prompt},
                 {role: 'assistant', content: data.response}
@@ -507,6 +548,9 @@ def index() -> Response:
       updateQueueStatus();
       promptEl.focus();
     }
+
+    // Show anything already in the saved self-talk conversation on load.
+    startSelfTalkPolling();
 
     sendBtn.addEventListener('click', () => enqueuePrompt(false));
     steerBtn.addEventListener('click', () => enqueuePrompt(true));
@@ -997,6 +1041,32 @@ def admin_ftp_status() -> Response:
     return jsonify(get_ftp_status())
 
 
+@app.get("/api/selftalk")
+@app.get("/api/selftalk/thread")
+def api_selftalk_thread() -> Response:
+    """Turns of the continuous self-talk conversation, for the chat window to tail.
+
+    ``?after=N`` returns only turns added since index ``N``; the response's
+    ``next`` is the index to pass next time, so polling is cheap and ordered.
+    """
+    try:
+        after = int(request.args.get("after", "0") or 0)
+    except ValueError:
+        after = 0
+    try:
+        from my_ai.autonomous_self_talk import PeakeSelfTalkEngine, get_runner
+
+        turns, nxt = PeakeSelfTalkEngine().dialogue.since(after)
+        return jsonify({
+            "ok": True,
+            "turns": turns,
+            "next": nxt,
+            "running": get_runner().status().get("running", False),
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "turns": [], "next": after}), 500
+
+
 @app.route("/api/chat", methods=["POST", "OPTIONS"])
 def api_chat() -> Response:
     if request.method == "OPTIONS":
@@ -1012,27 +1082,42 @@ def api_chat() -> Response:
         return jsonify({"error": "rate limit exceeded; try again shortly"}), 429
 
     if prompt.lower().startswith("/selftalk"):
-        topic = prompt[len("/selftalk"):].strip() or "general knowledge"
-        try:
-            from my_ai.autonomous_self_talk import PeakeSelfTalkEngine
-            engine = PeakeSelfTalkEngine()
-            engine.execute_self_talk_command(cycles=1, curriculum_topic=topic)
-        except Exception as exc:
-            return jsonify({"error": f"self-talk failed: {exc}"}), 500
+        rest = prompt[len("/selftalk"):].strip()
+        head, _, tail = rest.partition(" ")
+        # "/selftalk quantum physics" -> start on the whole topic, not on "quantum".
+        if head.lower() in {"on", "start", "off", "stop", "status", "clear"}:
+            command, topic = head.lower(), tail.strip()
+        else:
+            command, topic = "on", rest
+        from my_ai.autonomous_self_talk import get_runner
 
-        def run_selftalk():
-            import time
+        runner = get_runner()
+        if command in {"off", "stop"}:
+            runner.stop("stopped from chat")
+            return jsonify({"response": "Self-talk stopped. The conversation is saved; `/selftalk on` resumes it."})
+        if command == "status":
+            state = runner.status()
+            if state["running"]:
+                summary = f"running on '{state['topic']}' ({state['turns']} turns this run)"
+            else:
+                summary = "not running" + (f" ({state['stopped_reason']})" if state.get("stopped_reason") else "")
+            if state.get("last_error"):
+                summary += f"; last error: {state['last_error'][:120]}"
+            return jsonify({"response": f"Self-talk: {summary}. The conversation is shown in this chat."})
+        if command == "clear":
             from my_ai.autonomous_self_talk import PeakeSelfTalkEngine
-            engine = PeakeSelfTalkEngine()
-            end = time.time() + 24*3600
-            while time.time() < end:
-                try:
-                    engine.execute_self_talk_command(cycles=1, curriculum_topic=topic)
-                except Exception as exc:
-                    print(f"[selftalk] {exc}", flush=True)
-                time.sleep(60)
-        threading.Thread(target=run_selftalk, name="selftalk-24h", daemon=True).start()
-        return jsonify({"response": f"Self-talk started for 24h on: {topic}"})
+
+            PeakeSelfTalkEngine().dialogue.clear()
+            return jsonify({"response": "Self-talk conversation cleared. It will start a fresh lesson."})
+        started = runner.start(topic.strip())
+        head = "Self-talk started" if started else "Self-talk already running"
+        return jsonify({
+            "response": (
+                f"{head}{(' on: ' + topic.strip()) if topic.strip() else ''}. "
+                "Every role is answered by the configured AI providers and cross-checked, "
+                "and the conversation continues below. Use /selftalk off to stop."
+            )
+        })
     history = normalize_history(payload.get("history", []))
 
     with _GENERATION_LOCK:

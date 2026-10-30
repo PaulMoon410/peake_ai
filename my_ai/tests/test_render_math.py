@@ -2,6 +2,7 @@ from pathlib import Path
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -694,6 +695,80 @@ class GutenbergHandlerTests(unittest.TestCase):
         self.assertEqual(1, len(items))
         self.assertEqual(1, dropped)
         self.assertEqual("ok prompt", items[0].prompt)
+
+
+
+
+class SelfTalkTests(unittest.TestCase):
+    """Continuous self-talk: corroborated answers, continuity, persistence."""
+
+    def _engine(self, dialogue_path: str):
+        from my_ai.autonomous_self_talk import PeakeSelfTalkEngine
+
+        def ask(messages, purpose="single"):
+            if purpose == "single":
+                return {"answer": "The corroborated answer is the accurate one."}
+            return {
+                "answers": {
+                    "openai": "A variable stores a value.",
+                    "groq": "A variable keeps a value.",
+                    "deepseek": "Turtles are reptiles.",
+                },
+                "order": ["openai", "groq", "deepseek"],
+                "failures": {},
+            }
+
+        return PeakeSelfTalkEngine(buffer_path=os.path.join(dialogue_path, "b.json"),
+                                   dialogue_path=os.path.join(dialogue_path, "d.json"),
+                                   ask=ask)
+
+    def test_corroborated_answer_wins_and_conversation_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine(tmp)
+            engine.dialogue.set_topic("programming")
+            first = engine.next_turn()
+            second = engine.next_turn()
+
+            learner_turns = [t for t in engine.dialogue.turns if t["role"] == "learner"]
+            self.assertEqual("A variable stores a value.", learner_turns[0]["text"])
+            self.assertEqual(2, learner_turns[0]["agreement"])
+            # Continuity: the second turn still sees the first.
+            self.assertIn("variable", engine.dialogue.transcript())
+            self.assertEqual(first["topic"], second["topic"])
+            # The critic checks the answer after it is recorded, not before.
+            roles = [t["role"] for t in engine.dialogue.turns if t["role"] != "system"]
+            self.assertEqual(["instructor", "learner", "critic"] * 2, roles)
+
+            # Persistence: a fresh engine resumes the same conversation.
+            resumed = self._engine(tmp)
+            self.assertEqual(len(engine.dialogue.turns), len(resumed.dialogue.turns))
+            self.assertEqual("programming", resumed.dialogue.current_topic())
+            chunk, nxt = resumed.dialogue.since(0)
+            self.assertEqual(len(chunk), len(resumed.dialogue.turns))
+            self.assertEqual([], resumed.dialogue.since(nxt)[0])
+
+    def test_runner_is_idempotent_and_stops(self) -> None:
+        from unittest.mock import patch
+        import my_ai.autonomous_self_talk as st
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine(tmp)
+            runner = st.SelfTalkRunner(engine_factory=lambda: engine, cycle_seconds=0.01,
+                                       seconds_per_day=30, max_turns_per_day=2)
+            with patch.dict(os.environ, {"SELF_TALK_DIALOGUE_FILE": os.path.join(tmp, "d.json")}):
+                self.assertTrue(runner.start("math"))
+                self.assertFalse(runner.start("math"), "second start must not spawn a duplicate")
+                for _ in range(200):
+                    if runner.turns_done >= 2 or not runner.running:
+                        break
+                    time.sleep(0.01)
+                runner.stop("test done")
+                for _ in range(100):
+                    if not runner.running:
+                        break
+                    time.sleep(0.01)
+            self.assertFalse(runner.running)
+            self.assertEqual(2, runner.turns_done, "daily turn limit must be respected")
 
 
 if __name__ == "__main__":

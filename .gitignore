@@ -52,6 +52,7 @@ my_ai/tests/*
 !intent_learner.py
 
 # Runtime/cache artifacts
+self_talk_dialogue.json
 *.pyc
 __pycache__/
 *.db
