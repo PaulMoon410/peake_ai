@@ -130,7 +130,8 @@ class SelfTalkDialogue:
 
     # -- access ----------------------------------------------------------
     def add(self, role: str, text: str, *, topic: str = "", provider: str = "",
-            agreement: int = 0, models: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+            agreement: int = 0, models: Optional[Dict[str, str]] = None,
+            learning_objective: str = "") -> Dict[str, Any]:
         turn = {
             "role": role,
             "text": text,
@@ -138,6 +139,7 @@ class SelfTalkDialogue:
             "provider": provider,
             "agreement": agreement,
             "models": models or {},
+            "learning_objective": learning_objective,
             "timestamp": datetime.now().isoformat(),
         }
         with self._lock:
@@ -299,6 +301,7 @@ class PeakeSelfTalkEngine:
             self.dialogue.add(
                 "learner", answer, topic=topic, provider=answer_turn["provider"],
                 agreement=answer_turn["agreement"], models=answer_turn["answers"],
+                learning_objective=learning_objective
             )
             # Check the answer *after* it is recorded, so the log reads in order.
             critique = self._critique(topic, learning_objective, answer_turn["answers"]) if answer else ""
@@ -323,6 +326,7 @@ class PeakeSelfTalkEngine:
         self.dialogue.add(
             "instructor", question, topic=topic, provider=question_turn["provider"],
             agreement=question_turn["agreement"], models=question_turn["answers"],
+            learning_objective=learning_objective
         )
         
         return {"topic": topic, "question": question, "answer": "", "critique": ""}
