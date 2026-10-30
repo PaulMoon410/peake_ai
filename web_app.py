@@ -192,6 +192,7 @@ def _start_keepalive_learning() -> None:
                 pass
             if time.time() - _LAST_USER_ACTIVITY >= 60:
                 try:
+                    from my_ai.harold.agent import HaroldAgent
                     from peakebot import _get_mcf_memory_store
                     store = _get_mcf_memory_store()
                     agent = HaroldAgent(store)
@@ -206,6 +207,17 @@ def _start_keepalive_learning() -> None:
                     print(f"[keepalive] learning failed: {type(exc).__name__}: {exc}", flush=True)
 
     threading.Thread(target=run, name="keepalive-learning", daemon=True).start()
+    now = time.time()
+    q = _REQUEST_LOG[client_ip]
+    while q and now - q[0] > _RATE_WINDOW_SECONDS:
+        q.popleft()
+    if len(q) >= _RATE_LIMIT_REQUESTS:
+        return False
+    q.append(now)
+    return True
+
+
+def _check_rate_limit(client_ip: str) -> bool:
     now = time.time()
     q = _REQUEST_LOG[client_ip]
     while q and now - q[0] > _RATE_WINDOW_SECONDS:
