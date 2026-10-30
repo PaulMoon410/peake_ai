@@ -606,6 +606,107 @@ class GutenbergHandlerTests(unittest.TestCase):
         self.assertIsNone(peakebot._handle_gutenberg_request("hello how are you"))
         self.assertIsNone(peakebot._handle_gutenberg_request("what is 2 + 2"))
 
+    def test_intent_learner_uses_semantic_router_and_falls_back_cleanly(self) -> None:
+        from unittest.mock import Mock
+
+        class _Choice:
+            def __init__(self, name: str, score: float) -> None:
+                self.name, self.similarity_score = name, score
+
+        class _Route:
+            def __init__(self, name: str, utterances: list, score_threshold: float) -> None:
+                self.name = name
+
+        class _SemanticRouter:
+            builds = 0
+
+            def __init__(self, encoder, routes, auto_sync):
+                type(self).builds += 1
+                self.routes = routes
+
+            def __call__(self, query: str):
+                if "written instead of" in query and any(r.name == "math" for r in self.routes):
+                    return _Choice("math", 0.85)
+                return _Choice("math", 0.1)
+
+        class _Encoder:
+            def __init__(self) -> None:
+                pass
+
+        router_mod = types.ModuleType("semantic_router")
+        router_mod.Route = _Route  # type: ignore[attr-defined]
+        router_mod.SemanticRouter = _SemanticRouter  # type: ignore[attr-defined]
+        encoders_mod = types.ModuleType("semantic_router.encoders")
+        encoders_mod.HuggingFaceEncoder = _Encoder  # type: ignore[attr-defined]
+        encoders_mod.FastEmbedEncoder = _Encoder  # type: ignore[attr-defined]
+
+        store = Mock()
+        store.ftp_configured = False
+        store.relevant.return_value = (
+            "- [Harold/Understanding/Intents] INTENT:math || learn math: 2 plus 2"
+        )
+
+        previous_learner = peakebot.intent_learner
+        # Save/restore the module slots by hand: patch.dict would restore the
+        # whole sys.modules snapshot and drop ``peakebot`` for later tests.
+        saved_modules = {
+            name: sys.modules.get(name)
+            for name in ("semantic_router", "semantic_router.encoders")
+        }
+        peakebot._SEMANTIC_ROUTER_CACHE.update(signature=None, router=None)
+        sys.modules["semantic_router"] = router_mod
+        sys.modules["semantic_router.encoders"] = encoders_mod
+        try:
+            learner = peakebot.IntentLearner(store)
+            peakebot.intent_learner = learner
+            self.assertEqual("semantic-router", learner.router_engine)
+            # Paraphrase that token overlap would miss, found by embeddings.
+            self.assertEqual(("math", 0.85), learner.match_intent("say it with words written instead of numbers"))
+            # A high lexical match must still beat a weak semantic one.
+            self.assertEqual("math", learner.match_intent("please learn math: 2 plus 2")[0])
+            self.assertIsNone(learner.match_intent("unrelated chit chat about weather today"))
+            learner.match_intent("another turn")
+            self.assertEqual(1, _SemanticRouter.builds, "router must be built once per learning state")
+
+            # Encoder failure is a silent downgrade, never a crash.
+            class _BrokenEncoder:
+                def __init__(self) -> None:
+                    raise RuntimeError("model download blocked")
+
+            encoders_mod.HuggingFaceEncoder = _BrokenEncoder  # type: ignore[attr-defined]
+            encoders_mod.FastEmbedEncoder = _BrokenEncoder  # type: ignore[attr-defined]
+            peakebot._SEMANTIC_ROUTER_CACHE.update(signature=None, router=None)
+            # A live router cannot follow hot-swapped module globals, so build a
+            # fresh learner: its first turn must hit the broken encoder and degrade.
+            broken = peakebot.IntentLearner(store)
+            self.assertEqual("semantic-router", broken.router_engine)
+            self.assertIsNone(broken.match_intent("say it with words written instead of numbers"))
+            self.assertEqual("token-overlap", broken.router.engine)
+        finally:
+            for name, module in saved_modules.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+            peakebot._SEMANTIC_ROUTER_CACHE.update(signature=None, router=None)
+            peakebot.intent_learner = previous_learner
+
+    def test_online_learning_buffer_rejects_malformed_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            buffer_path = os.path.join(tmp, "online_learning_buffer.json")
+            with open(buffer_path, "w", encoding="utf-8") as f:
+                f.write('{"items": [{"prompt": "ok prompt", "response": "ok answer", "quality": 0.9}, 17]}')
+            previous = peakebot.ONLINE_LEARNING_BUFFER_FILE
+            try:
+                peakebot.ONLINE_LEARNING_BUFFER_FILE = buffer_path
+                items, dropped = peakebot.load_learning_buffer(Path(buffer_path))
+            finally:
+                peakebot.ONLINE_LEARNING_BUFFER_FILE = previous
+
+        self.assertEqual(1, len(items))
+        self.assertEqual(1, dropped)
+        self.assertEqual("ok prompt", items[0].prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

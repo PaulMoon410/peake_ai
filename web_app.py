@@ -60,6 +60,10 @@ _FTP_STARTUP_SYNC_MAX_ATTEMPTS = int(os.getenv("FTP_STARTUP_SYNC_MAX_ATTEMPTS", 
 _MODEL_WARMUP_LOCK = threading.Lock()
 _MODEL_WARMUP_STARTED = False
 
+_LAST_USER_ACTIVITY = time.time()
+_KEEPALIVE_THREAD_STARTED = False
+_KEEPALIVE_LOCK = threading.Lock()
+
 CHAT_API_KEY = os.getenv("CHAT_API_KEY", "").strip()
 ADMIN_PANEL_ENABLED = os.getenv("ADMIN_PANEL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
@@ -156,12 +160,52 @@ def _kickoff_ftp_startup_check() -> None:
   _start_ftp_startup_sync()
   _start_model_warmup()
   _start_daily_ecency_poster()
+  _start_keepalive_learning()
+  if request.path != "/health":
+      _touch_user_activity()
   if request.path != "/health":
     # Let the archive finish before handling real traffic.
     _FTP_STARTUP_SYNC_DONE.wait(timeout=_FTP_STARTUP_SYNC_TIMEOUT)
 
 
-def _check_rate_limit(client_ip: str) -> bool:
+def _touch_user_activity() -> None:
+    global _LAST_USER_ACTIVITY
+    _LAST_USER_ACTIVITY = time.time()
+
+
+def _start_keepalive_learning() -> None:
+    global _KEEPALIVE_THREAD_STARTED
+    with _KEEPALIVE_LOCK:
+        if _KEEPALIVE_THREAD_STARTED:
+            return
+        _KEEPALIVE_THREAD_STARTED = True
+
+    def run() -> None:
+        port = os.getenv("PORT", "10000")
+        base = os.getenv("RENDER_EXTERNAL_URL", f"http://127.0.0.1:{port}").rstrip("/")
+        while True:
+            time.sleep(60)
+            try:
+                import urllib.request
+                urllib.request.urlopen(f"{base}/health", timeout=10).read()
+            except Exception:
+                pass
+            if time.time() - _LAST_USER_ACTIVITY >= 60:
+                try:
+                    from peakebot import _get_mcf_memory_store
+                    store = _get_mcf_memory_store()
+                    agent = HaroldAgent(store)
+                    agent.learn(topic_limit=2)
+                    try:
+                        from my_ai.memory_organizer import sync_and_organize
+                        sync_and_organize()
+                    except Exception:
+                        pass
+                    print("[keepalive] idle learning pass complete", flush=True)
+                except Exception as exc:
+                    print(f"[keepalive] learning failed: {type(exc).__name__}: {exc}", flush=True)
+
+    threading.Thread(target=run, name="keepalive-learning", daemon=True).start()
     now = time.time()
     q = _REQUEST_LOG[client_ip]
     while q and now - q[0] > _RATE_WINDOW_SECONDS:

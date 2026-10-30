@@ -400,6 +400,9 @@ class MemoryStore:
         # Chat threads may recall while another thread saves; serialise writes.
         self._lock = threading.RLock()
         self._mesh_lock = threading.RLock()
+        # The FTS connection is shared by every reader (check_same_thread=False),
+        # so index queries are serialised too.
+        self._index_lock = threading.RLock()
         # Archives written by older versions keep their index/mesh beside the
         # notes (pocket-ai-memory.jsonl.index.jsonl). Archives that also carry an
         # FTP index keep everything together under the "harold" folder, so no
@@ -1301,10 +1304,13 @@ class MemoryStore:
             match_terms = ["\"" + term.replace("\"", "\"\"") + "\"" for term in sorted(search_terms)]
             match_clause = " OR ".join(match_terms)
             try:
-                rows = self._index.execute(
-                    "SELECT id, bm25(memories, 2.0, 1.5, 1.0) FROM memories WHERE memories MATCH ? LIMIT ?",
-                    (match_clause, limit * 4),
-                ).fetchall()
+                # Same cursor as _term_document_frequencies: serialise queries so
+                # two threads cannot interleave on the shared connection.
+                with self._index_lock:
+                    rows = self._index.execute(
+                        "SELECT id, bm25(memories, 2.0, 1.5, 1.0) FROM memories WHERE memories MATCH ? LIMIT ?",
+                        (match_clause, limit * 4),
+                    ).fetchall()
                 # bm25() returns negative numbers where more negative is better;
                 # the best hit becomes 1.0 and the rest scale against it.
                 best = min((float(score) for row_id, score in rows if row_id in by_id), default=0.0)
@@ -1397,11 +1403,15 @@ class MemoryStore:
         for term in terms:
             quoted = "\"" + term.replace("\"", "\"\"") + "\""
             try:
-                row = self._index.execute(
-                    "SELECT COUNT(*) FROM memories WHERE memories MATCH ?", (quoted,)
-                ).fetchone()
-                frequencies[term] = int(row[0]) if row else 1
-            except sqlite3.Error:
+                with self._index_lock:
+                    row = self._index.execute(
+                        "SELECT COUNT(*) FROM memories WHERE memories MATCH ?", (quoted,)
+                    ).fetchone()
+                # A row with a NULL count (or a shared-connection race) must not
+                # break recall: an unknown frequency is treated as "rare".
+                value = row[0] if row else None
+                frequencies[term] = int(value) if isinstance(value, (int, float)) else 1
+            except (sqlite3.Error, TypeError, ValueError):
                 frequencies[term] = 1
         return frequencies
 

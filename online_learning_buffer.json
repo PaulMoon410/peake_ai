@@ -1,11 +1,32 @@
 {
   "items": [
     {
-      "prompt": "hello",
-      "response": "Hello! Welcome to PeakeBot. How can I help you today?",
-      "source": "conversation",
+      "prompt": "how do i place a sell order on hive engine?",
+      "response": ". every ! to of perspective on you what to can internet with to am.",
+      "source": "vscode_agent",
       "quality": 0.9,
-      "timestamp": "2026-05-10T00:18:39.397579"
+      "timestamp": "2026-10-30T16:17:06.305721"
+    },
+    {
+      "prompt": "where do i find my ftp memory notes?",
+      "response": "Capable understand . you doing to.",
+      "source": "vscode_agent",
+      "quality": 0.7,
+      "timestamp": "2026-10-30T16:19:40.813995"
+    },
+    {
+      "prompt": "where do i find my ftp memory notes?",
+      "response": "Here is what I have saved on this: - [Hive/Fetching_Order_Book__Balances_; saved 2026-10-11; user_reported_unverified] def query_hive_engine(contract: str, table: str, query: dict, limit: int = 20) -> list: payload = json.dumps({ \"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"find\", \"params\": { \"contract\": contract, \"table\": table, \"query\": query, \"limit\": limit } }).encode(\"utf-8\") req = urllib.request.Request(RPC_URL, data=payload, headers={\"Content-Type\": \"application/json\"}) with urllib.request.urlopen(req, timeout=15) as res: data = json.loads(res.read().decode(\"utf-8\")) return data.get(\"result\", []) - [RELATED via application, content, data; Hive/2_Zero-Dependency_Hive_RPC_Que; saved 2026-10-11; user_reported_unverified] def hive_rpc(method: str, params: list) -> dict: payload = json.dumps({ \"jsonrpc\": \"2.0\", \"id\": 1, \"method\": method, \"params\": params }).encode(\"utf-8\") req = urllib.request.Request(HIVE_RPC, data=payload, headers={\"Content-Type\": \"application/json\"}) with urllib.request.urlopen(req, timeout=10) as res: return json.loads(res.read().decode(\"utf-8\")).get(\"result\") - [RELATED via content, data, urllib; Hive/2_Zero-Dependency_Hive_RPC_Que; saved 2026-10-11; user_reported_unverified] If you only need to read data (account balances, witness state, voting power, post content) without signing transactions, you don't even need `beem`. You can use Python's built-in `urllib`: I'm still learning this topic, so treat these as unverified notes.",
+      "source": "vscode_agent",
+      "quality": 0.9,
+      "timestamp": "2026-10-30T16:20:03.478348"
+    },
+    {
+      "prompt": "how do i place a sell order on hive engine?",
+      "response": "As , if learn to is [related my with and we.",
+      "source": "vscode_agent",
+      "quality": 0.9,
+      "timestamp": "2026-10-30T16:20:09.616813"
     }
   ]
 }

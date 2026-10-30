@@ -25,6 +25,13 @@ from my_ai.conversation import (
     normalize_history,
     research_answer_system_prompt,
 )
+from my_ai.learning_schemas import (
+    LearningItem,
+    load_learning_buffer,
+    load_topics,
+    save_learning_buffer,
+    save_topics,
+)
 from my_ai.math_learner import MathLearner
 from my_ai.memory_store import MemoryStore, _MAX_NOTE_CHARS
 from my_ai.memory_organizer import sync_and_organize, HttpRecallCoordinator, organize_memory
@@ -299,6 +306,18 @@ _MAX_INTENT_EXAMPLES_PER_TYPE = 24
 _MIN_INTENT_MATCH_SCORE = 0.4
 from intent_learner import IntentLearner
 
+# Semantic Router (https://github.com/aurelio-labs/semantic-router) is an
+# optional accelerator for intent matching. When it (or its encoder deps) is
+# missing we fall back to the built-in token-overlap scorer, so every helper
+# below must degrade to ``None``/``False`` instead of raising.
+_SEMANTIC_ROUTER_ENABLED = os.getenv("SEMANTIC_ROUTER_ENABLED", "1").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+_SEMANTIC_ROUTER_THRESHOLD = float(os.getenv("SEMANTIC_ROUTER_THRESHOLD", str(_MIN_INTENT_MATCH_SCORE)))
+_SEMANTIC_ROUTER_ROUTE_LIMIT = int(os.getenv("SEMANTIC_ROUTER_ROUTE_LIMIT", "200"))
+_SEMANTIC_ROUTER_LOCK = threading.Lock()
+_SEMANTIC_ROUTER_CACHE: dict = {"signature": None, "router": None}
+
 # Entries are buffered until a batch is full, then handed to the upload worker.
 _FTP_PENDING_ENTRIES: list[dict] = []
 _FTP_PENDING_LOCK = threading.Lock()
@@ -381,8 +400,98 @@ def _get_intent_learner() -> "IntentLearner":
         if intent_learner is None:
             store = _get_mcf_memory_store()
             intent_learner = IntentLearner(store)
-            print(f"🎯 Intent learner ready ({len(intent_learner.intents)} intent type(s) loaded).", flush=True)
+            router = getattr(intent_learner, "router", None)
+            engine = getattr(router, "engine", None) or getattr(intent_learner, "router_engine", "token-overlap")
+            print(f"🎯 Intent learner ready ({len(intent_learner.intents)} intent type(s) loaded, router: {engine}).", flush=True)
         return intent_learner
+
+
+def _semantic_router_import() -> tuple | None:
+    """Import the Semantic Router pieces once; ``None`` when unavailable."""
+    if not _SEMANTIC_ROUTER_ENABLED:
+        return None
+    try:
+        from semantic_router import Route, SemanticRouter
+        from semantic_router.encoders import FastEmbedEncoder, HuggingFaceEncoder
+    except Exception:
+        return None
+    return Route, SemanticRouter, HuggingFaceEncoder, FastEmbedEncoder
+
+
+def _semantic_router_identify(query: str) -> tuple[str, float] | None:
+    """Score ``query`` against the learned intents with local embeddings.
+
+    Returns ``(intent_type, similarity)`` only for a learned intent at or above
+    ``_SEMANTIC_ROUTER_THRESHOLD``; ``None`` means "no semantic opinion" and the
+    caller keeps its own token-overlap matching. Never raises: a missing
+    package, model download failure, or bad model output all return ``None``.
+    """
+    if not _SEMANTIC_ROUTER_ENABLED:
+        return None
+    # Score against the live learner even before ``_get_intent_learner`` ran.
+    learner = intent_learner
+    if learner is None:
+        try:
+            learner = _get_intent_learner()
+        except Exception:
+            return None
+    intents = dict(getattr(learner, "intents", None) or {})
+    if not intents:
+        return None
+    try:
+        if len(_tokens(query)) < 2:
+            return None  # too little text for embeddings to be meaningful
+    except Exception:
+        pass
+    pieces = _semantic_router_import()
+    if pieces is None:
+        return None
+    Route, SemanticRouter, HuggingFaceEncoder, FastEmbedEncoder = pieces
+    signature = tuple(
+        (intent_type, tuple(examples[-_MAX_INTENT_EXAMPLES_PER_TYPE:]))
+        for intent_type, examples in sorted(intents.items())
+        if intent_type in _ALLOWED_INTENT_TYPES and examples
+    )
+    if not signature:
+        return None
+    try:
+        with _SEMANTIC_ROUTER_LOCK:
+            if _SEMANTIC_ROUTER_CACHE["signature"] != signature:
+                routes = [
+                    Route(name=intent_type, utterances=list(examples), score_threshold=_SEMANTIC_ROUTER_THRESHOLD)
+                    for intent_type, examples in signature[: _SEMANTIC_ROUTER_ROUTE_LIMIT]
+                ]
+                router = None
+                for encoder_cls in (HuggingFaceEncoder, FastEmbedEncoder):
+                    try:
+                        router = SemanticRouter(
+                            encoder=encoder_cls(), routes=routes, auto_sync="local",
+                        )
+                        break
+                    except Exception as exc:
+                        print(f"⚠️ Semantic Router encoder unavailable ({encoder_cls.__name__}): {str(exc)[:160]}")
+                if router is None:
+                    print("⚠️ No local embedding encoder available; Semantic Router disabled (token overlap only).")
+                _SEMANTIC_ROUTER_CACHE["signature"] = signature
+                _SEMANTIC_ROUTER_CACHE["router"] = router
+            router = _SEMANTIC_ROUTER_CACHE["router"]
+        if router is None:
+            return None
+        choice = router(query)
+    except Exception as exc:
+        print(f"⚠️ Semantic Router fell back to token overlap: {type(exc).__name__}: {str(exc)[:160]}")
+        _SEMANTIC_ROUTER_CACHE["router"] = None  # rebuild on the next turn
+        return None
+    name = getattr(choice, "name", "")
+    if name not in _ALLOWED_INTENT_TYPES:
+        return None
+    try:
+        similarity = float(getattr(choice, "similarity_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        similarity = 0.0
+    if similarity < _SEMANTIC_ROUTER_THRESHOLD:
+        return None
+    return name, similarity
 
 
 def _tmp_path(filename: str) -> str:
@@ -665,17 +774,16 @@ def _queue_online_learning(prompt: str, response: str, source: str = "chat"):
         # Track interaction stats, but only learn from stronger samples.
         return
 
-    buffer_data = _load_json_file(ONLINE_LEARNING_BUFFER_FILE, {"items": []})
-    items = buffer_data.get("items", [])
-    items.append({
-        "prompt": prompt,
-        "response": response,
-        "source": source,
-        "quality": quality,
-        "timestamp": datetime.now().isoformat(),
-    })
-    buffer_data["items"] = items[-200:]
-    _save_json_file(ONLINE_LEARNING_BUFFER_FILE, buffer_data)
+    # Validate through learning_schemas so one bad interaction is rejected here
+    # instead of being written to disk and trained on later.
+    try:
+        item = LearningItem(prompt=prompt, response=response, source=source, quality=quality)
+    except ValueError as exc:
+        print(f"⚠️ Online learning item rejected: {exc}")
+        return
+    items, _dropped = load_learning_buffer(Path(ONLINE_LEARNING_BUFFER_FILE))
+    items.append(item)
+    save_learning_buffer(Path(ONLINE_LEARNING_BUFFER_FILE), items)
     _flush_online_learning()
 
 
@@ -683,8 +791,9 @@ def _flush_online_learning(force: bool = False):
     if not ONLINE_LEARNING_ENABLED:
         return
 
-    buffer_data = _load_json_file(ONLINE_LEARNING_BUFFER_FILE, {"items": []})
-    items = buffer_data.get("items", [])
+    items, dropped = load_learning_buffer(Path(ONLINE_LEARNING_BUFFER_FILE))
+    if dropped:
+        print(f"⚠️ Dropped {dropped} malformed online learning item(s) from {ONLINE_LEARNING_BUFFER_FILE}")
     if not items:
         return
 
@@ -712,13 +821,10 @@ def _flush_online_learning(force: bool = False):
     with _MODEL_TRAIN_LOCK:
         for sample in batch:
             try:
-                prompt_text = sample.get("prompt", "")
-                response_text = sample.get("response", "")
-                quality = float(sample.get("quality", 0.0) or 0.0)
                 # Train longer on higher-quality interactions so the model
                 # retains strong signal more durably.
-                epochs = 1 if quality < 0.8 else 2
-                active_model.learn_from_conversation(prompt_text, response_text, epochs=epochs)
+                epochs = 1 if sample.quality < 0.8 else 2
+                active_model.learn_from_conversation(sample.prompt, sample.response, epochs=epochs)
                 learned += 1
             except Exception as e:
                 print(f"⚠️ Online learning sample skipped: {str(e)}")
@@ -744,8 +850,7 @@ def _flush_online_learning(force: bool = False):
             except Exception as e:
                 print(f"⚠️ Model checkpoint save failed: {str(e)}")
 
-    buffer_data["items"] = remaining
-    _save_json_file(ONLINE_LEARNING_BUFFER_FILE, buffer_data)
+    save_learning_buffer(Path(ONLINE_LEARNING_BUFFER_FILE), remaining)
 
     if learned > 0:
         profile["online_learning_runs"] = int(profile.get("online_learning_runs", 0)) + 1
@@ -942,8 +1047,8 @@ def queue_learning_topic(topic: str):
 
 def get_growth_snapshot() -> dict:
     profile = _load_json_file(GROWTH_PROFILE_FILE, _default_growth_profile())
-    buffer_data = _load_json_file(ONLINE_LEARNING_BUFFER_FILE, {"items": []})
-    pending_learning = len(buffer_data.get("items", [])) if isinstance(buffer_data, dict) else 0
+    buffer_items, _dropped = load_learning_buffer(Path(ONLINE_LEARNING_BUFFER_FILE))
+    pending_learning = len(buffer_items)
     with _FTP_PENDING_LOCK:
         pending_ftp = len(_FTP_PENDING_ENTRIES)
     snapshot = {
@@ -1671,10 +1776,9 @@ if not os.path.exists(HISTORY_FILE):
     with open(HISTORY_FILE, "w") as f:
         json.dump([], f)
 
-# Ensure learning queue exists
+# Ensure learning queue exists (created through the schema so it is valid JSON)
 if not os.path.exists(LEARNING_QUEUE_FILE):
-    with open(LEARNING_QUEUE_FILE, "w") as f:
-        json.dump([], f)
+    save_topics(Path(LEARNING_QUEUE_FILE), [])
 
 # Ensure learned topics tracker exists
 if not os.path.exists(LEARNED_TOPICS_FILE):
@@ -1705,15 +1809,12 @@ def search_memory(query):
 def add_to_learning_queue(topic: str):
     """Add a topic to the learning queue for autonomous exploration."""
     try:
-        with open(LEARNING_QUEUE_FILE, "r") as f:
-            queue = json.load(f)
-        
-        # Avoid duplicates
-        topic_lower = topic.lower().strip()
-        if topic_lower not in [t.lower() for t in queue]:
+        # load_topics validates entries and de-duplicates case-insensitively.
+        queue, _dropped = load_topics(Path(LEARNING_QUEUE_FILE))
+        topic_lower = str(topic).lower().strip()
+        if topic_lower and topic_lower not in [t.lower() for t in queue]:
             queue.append(topic)
-            with open(LEARNING_QUEUE_FILE, "w") as f:
-                json.dump(queue[-100:], f, indent=2)  # Keep last 100
+            save_topics(Path(LEARNING_QUEUE_FILE), queue[-100:])  # Keep last 100
             print(f"📝 Queued for learning: {topic}")
     except Exception as e:
         print(f"⚠️ Failed to queue topic: {str(e)}")
@@ -1721,8 +1822,9 @@ def add_to_learning_queue(topic: str):
 def process_learning_queue(max_topics: int = 3):
     """Autonomously research topics from the learning queue."""
     try:
-        with open(LEARNING_QUEUE_FILE, "r") as f:
-            queue = json.load(f)
+        queue, dropped = load_topics(Path(LEARNING_QUEUE_FILE))
+        if dropped:
+            print(f"⚠️ Dropped {dropped} malformed learning topic(s) from {LEARNING_QUEUE_FILE}")
         
         with open(LEARNED_TOPICS_FILE, "r") as f:
             learned_data = json.load(f)
@@ -1793,8 +1895,7 @@ def process_learning_queue(max_topics: int = 3):
             time.sleep(2)  # Respectful delay
         
         # Update queue and learned topics
-        with open(LEARNING_QUEUE_FILE, "w") as f:
-            json.dump(queue[processed:], f, indent=2)
+        save_topics(Path(LEARNING_QUEUE_FILE), queue[processed:])
         
         learned_data["last_learning_session"] = datetime.now().isoformat()
         with open(LEARNED_TOPICS_FILE, "w") as f:
@@ -3401,99 +3502,9 @@ _MAX_INTENT_EXAMPLES_PER_TYPE = 24
 _MIN_INTENT_MATCH_SCORE = 0.4
 
 
-class IntentLearner:
-    """Learns phrase-to-action mappings from conversation, applied linguistically.
-
-    Harold watches which user wordings lead to successful actions (math, memory,
-    search, and website reading) and stores those phrase→intent mappings in
-    MCF3 memory. Later, free-form input that semantically matches a learned phrase
-    triggers the same action without requiring an exact command.
-    """
-
-    def __init__(self, store) -> None:
-        self.store = store
-        self.intents: dict[str, list[str]] = {}
-        self._load_intents()
-
-    def _load_intents(self) -> None:
-        try:
-            query = f"cat:{_INTENT_CATEGORY} INTENT"
-            if getattr(self.store, "ftp_configured", False):
-                notes = self.store.relevant_remote(query, limit=100, max_chars=24000)
-            else:
-                notes = self.store.relevant(query, limit=100, max_chars=24000)
-        except Exception:
-            try:
-                notes = self.store.relevant(f"cat:{_INTENT_CATEGORY} INTENT", limit=100, max_chars=24000)
-            except Exception:
-                notes = ""
-        if not notes:
-            return
-        for line in notes.splitlines():
-            if not line.startswith("- ["):
-                continue
-            # Extract note text after "] "
-            payload = line.split("] ", 1)[-1] if "] " in line else line
-            marker = "INTENT:"
-            if marker not in payload:
-                continue
-            body = payload[payload.index(marker) + len(marker):].strip()
-            parts = [p.strip() for p in body.split("||")]
-            if len(parts) < 2:
-                continue
-            action_type = parts[0]
-            examples = [p for p in parts[1:] if p]
-            if action_type in _ALLOWED_INTENT_TYPES and examples:
-                known = self.intents.setdefault(action_type, [])
-                for example in examples:
-                    if example not in known and len(known) < _MAX_INTENT_EXAMPLES_PER_TYPE:
-                        known.append(example)
-
-    def learn_intent(self, phrase: str, action_type: str) -> None:
-        """Record that `phrase` reliably maps to `action_type`."""
-        phrase = phrase.strip()
-        if (action_type not in _ALLOWED_INTENT_TYPES or len(phrase) < 4 or len(phrase) > 200
-            or "||" in phrase
-                or _SENSITIVE_MEMORY_RE.search(phrase)):
-            return
-        examples = self.intents.setdefault(action_type, [])
-        if phrase in examples or len(examples) >= _MAX_INTENT_EXAMPLES_PER_TYPE:
-            return
-        examples.append(phrase)
-        try:
-            note = f"INTENT:{action_type} || {phrase}"
-            record = self.store.add(note, category=_INTENT_CATEGORY)
-            if record and getattr(self.store, "ftp_configured", False):
-                try:
-                    self.store.upload(record)
-                except Exception as exc:
-                    print(f"⚠️ Intent FTP upload failed: {type(exc).__name__}: {str(exc)[:160]}")
-        except Exception as exc:
-            print(f"⚠️ Intent persistence failed: {exc}")
-
-    def match_intent(self, phrase: str) -> tuple[str, float] | None:
-        """Return (intent_type, confidence) for the best matching learned intent."""
-        if not self.intents:
-            return None
-        query_tokens = _tokens(phrase)
-        if len(query_tokens) < 2:
-            return None
-        best_type: str | None = None
-        best_score = 0.0
-        for action_type, examples in self.intents.items():
-            for example in examples:
-                example_tokens = _tokens(example)
-                if not example_tokens:
-                    continue
-                overlap = len(query_tokens & example_tokens)
-                union = len(query_tokens | example_tokens)
-                score = overlap / union if union else 0.0
-                if overlap >= 2 and score > best_score:
-                    best_score = score
-                    best_type = action_type
-        if best_type is not None and best_score >= _MIN_INTENT_MATCH_SCORE:
-            return best_type, best_score
-        return None
+# The learner itself lives in ``intent_learner.py`` (Semantic Router backed,
+# with the token-overlap scorer as its fallback). Kept importable from here so
+# ``peakebot.IntentLearner`` keeps resolving to a single implementation.
 
 
 def _apply_intent_action(

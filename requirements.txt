@@ -4,3 +4,14 @@ numpy>=1.23.0,<1.25.0
 beem>=0.24.26
 flask>=3.0.0
 gunicorn>=22.0.0
+
+# Intent routing + learning-file validation.
+# semantic-router is optional: without it (or without a working local encoder)
+# intent_learner.py falls back to token overlap. FastEmbed keeps it torch-free.
+pydantic>=2.0
+semantic-router>=0.0.60
+# fastembed>=0.3.0  # uncomment to use the torch-free ONNX encoder
+
+# Autonomous learning helpers (optional, free, no API keys).
+crawl4ai>=0.4.0
+duckduckgo-search>=6.0.0
