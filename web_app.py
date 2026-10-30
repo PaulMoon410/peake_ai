@@ -1019,6 +1019,14 @@ def api_chat() -> Response:
     if not _check_rate_limit(client_ip):
         return jsonify({"error": "rate limit exceeded; try again shortly"}), 429
 
+    if prompt.lower().startswith("/selftalk"):
+        topic = prompt[len("/selftalk"):].strip() or "general knowledge"
+        try:
+            from autonomous_self_talk import PeakeSelfTalkEngine
+            PeakeSelfTalkEngine().execute_self_talk_command(cycles=2, curriculum_topic=topic)
+            return jsonify({"response": f"Self-talk completed on: {topic}"})
+        except Exception as exc:
+            return jsonify({"error": f"self-talk failed: {exc}"}), 500
     history = normalize_history(payload.get("history", []))
 
     with _GENERATION_LOCK:
