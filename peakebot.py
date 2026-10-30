@@ -2551,7 +2551,7 @@ _HELP_RESPONSE = """Here are the commands I understand in this chat:
 • time in <city/timezone> — current local time for a city or time zone.
 • calendar events — list upcoming calendar events (Google Calendar if configured).
 • add event <name> on <datetime> — add a calendar event (Google Calendar if configured).
-• help or commands — show this list.
+• selftalk <topic> — run an internal self-talk learning session and store results.
 
 For a longer math note, try: learn math: The area of a circle is pi times the radius squared; circumference is 2 times pi times the radius. These are stored as unverified notes unless I can check them as basic arithmetic.
 
