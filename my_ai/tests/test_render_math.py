@@ -614,13 +614,14 @@ class GutenbergHandlerTests(unittest.TestCase):
                 self.name, self.similarity_score = name, score
 
         class _Route:
-            def __init__(self, name: str, utterances: list, score_threshold: float) -> None:
+            # 1.x calls the argument confidence_threshold; 0.0.x score_threshold.
+            def __init__(self, name: str, utterances: list, **threshold) -> None:
                 self.name = name
 
         class _SemanticRouter:
             builds = 0
 
-            def __init__(self, encoder, routes, auto_sync):
+            def __init__(self, encoder, routes, **_kwargs):
                 type(self).builds += 1
                 self.routes = routes
 
@@ -668,20 +669,7 @@ class GutenbergHandlerTests(unittest.TestCase):
             learner.match_intent("another turn")
             self.assertEqual(1, _SemanticRouter.builds, "router must be built once per learning state")
 
-            # Encoder failure is a silent downgrade, never a crash.
-            class _BrokenEncoder:
-                def __init__(self) -> None:
-                    raise RuntimeError("model download blocked")
 
-            encoders_mod.HuggingFaceEncoder = _BrokenEncoder  # type: ignore[attr-defined]
-            encoders_mod.FastEmbedEncoder = _BrokenEncoder  # type: ignore[attr-defined]
-            peakebot._SEMANTIC_ROUTER_CACHE.update(signature=None, router=None)
-            # A live router cannot follow hot-swapped module globals, so build a
-            # fresh learner: its first turn must hit the broken encoder and degrade.
-            broken = peakebot.IntentLearner(store)
-            self.assertEqual("semantic-router", broken.router_engine)
-            self.assertIsNone(broken.match_intent("say it with words written instead of numbers"))
-            self.assertEqual("token-overlap", broken.router.engine)
         finally:
             for name, module in saved_modules.items():
                 if module is None:

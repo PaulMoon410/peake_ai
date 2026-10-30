@@ -251,9 +251,27 @@ def _add_cors_headers(response: Response) -> Response:
     return response
 
 
-@app.get("/health")
-def health() -> Response:
-    return jsonify({"ok": True, "service": "peakebot-web"})
+@app.get("/api/memory")
+def api_memory_list() -> Response:
+    try:
+        store = _get_mcf_memory_store()
+        return jsonify({"ok": True, "records": store.all_records()})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.post("/api/memory")
+def api_memory_add() -> Response:
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"ok": False, "error": "text required"}), 400
+    try:
+        store = _get_mcf_memory_store()
+        rec = store.add(text, category=data.get("category", "API"), source=data.get("source", "api"))
+        return jsonify({"ok": True, "record": rec})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.get("/")

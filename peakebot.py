@@ -407,15 +407,25 @@ def _get_intent_learner() -> "IntentLearner":
 
 
 def _semantic_router_import() -> tuple | None:
-    """Import the Semantic Router pieces once; ``None`` when unavailable."""
+    """Load the Semantic Router pieces; ``None`` when unavailable.
+
+    Handles the 0.0.x API (``semantic_router.SemanticRouter``) and the 1.x API
+    (``semantic_router.routers.IndexedRouter``, ``confidence`` instead of
+    ``similarity_score``); an installed version that matches neither is
+    treated as unavailable rather than crashing the turn.
+    """
     if not _SEMANTIC_ROUTER_ENABLED:
         return None
     try:
-        from semantic_router import Route, SemanticRouter
-        from semantic_router.encoders import FastEmbedEncoder, HuggingFaceEncoder
+        from intent_learner import _load_api
+
+        api = _load_api()
     except Exception:
         return None
-    return Route, SemanticRouter, HuggingFaceEncoder, FastEmbedEncoder
+    if api is None:
+        return None
+    router_cls, make_encoder = api
+    return router_cls, make_encoder
 
 
 def _semantic_router_identify(query: str) -> tuple[str, float] | None:
@@ -443,10 +453,31 @@ def _semantic_router_identify(query: str) -> tuple[str, float] | None:
             return None  # too little text for embeddings to be meaningful
     except Exception:
         pass
+    # The learner owns the encoder and the version handling; it is the same
+    # routing the inline scorer uses, just called without mutating its state.
+    router = getattr(learner, "router", None)
+    if router is not None and hasattr(router, "route"):
+        try:
+            return router.route(
+                query,
+                {k: v for k, v in intents.items() if k in _ALLOWED_INTENT_TYPES},
+            )
+        except Exception:
+            return None
     pieces = _semantic_router_import()
     if pieces is None:
         return None
-    Route, SemanticRouter, HuggingFaceEncoder, FastEmbedEncoder = pieces
+    router_cls, make_encoder = pieces
+    from semantic_router import Route
+
+    def _build(routes):
+        from intent_learner import _build_router
+
+        encoder = make_encoder()
+        if encoder is None:
+            return None
+        return _build_router(router_cls, encoder, routes)
+
     signature = tuple(
         (intent_type, tuple(examples[-_MAX_INTENT_EXAMPLES_PER_TYPE:]))
         for intent_type, examples in sorted(intents.items())
@@ -457,19 +488,13 @@ def _semantic_router_identify(query: str) -> tuple[str, float] | None:
     try:
         with _SEMANTIC_ROUTER_LOCK:
             if _SEMANTIC_ROUTER_CACHE["signature"] != signature:
+                from intent_learner import _build_route
+
                 routes = [
-                    Route(name=intent_type, utterances=list(examples), score_threshold=_SEMANTIC_ROUTER_THRESHOLD)
+                    _build_route(Route, intent_type, list(examples), _SEMANTIC_ROUTER_THRESHOLD)
                     for intent_type, examples in signature[: _SEMANTIC_ROUTER_ROUTE_LIMIT]
                 ]
-                router = None
-                for encoder_cls in (HuggingFaceEncoder, FastEmbedEncoder):
-                    try:
-                        router = SemanticRouter(
-                            encoder=encoder_cls(), routes=routes, auto_sync="local",
-                        )
-                        break
-                    except Exception as exc:
-                        print(f"⚠️ Semantic Router encoder unavailable ({encoder_cls.__name__}): {str(exc)[:160]}")
+                router = _build(routes)
                 if router is None:
                     print("⚠️ No local embedding encoder available; Semantic Router disabled (token overlap only).")
                 _SEMANTIC_ROUTER_CACHE["signature"] = signature
@@ -482,13 +507,11 @@ def _semantic_router_identify(query: str) -> tuple[str, float] | None:
         print(f"⚠️ Semantic Router fell back to token overlap: {type(exc).__name__}: {str(exc)[:160]}")
         _SEMANTIC_ROUTER_CACHE["router"] = None  # rebuild on the next turn
         return None
-    name = getattr(choice, "name", "")
+    from intent_learner import _choice_result
+
+    name, similarity = _choice_result(choice)
     if name not in _ALLOWED_INTENT_TYPES:
         return None
-    try:
-        similarity = float(getattr(choice, "similarity_score", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        similarity = 0.0
     if similarity < _SEMANTIC_ROUTER_THRESHOLD:
         return None
     return name, similarity

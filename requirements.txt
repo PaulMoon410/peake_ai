@@ -1,16 +1,20 @@
 requests>=2.31.0
 beautifulsoup4>=4.12.0
-numpy>=1.23.0,<1.25.0
+# numpy>=1.25.2: semantic-router requires it (CodeGen, which has no 3.11 wheel,
+# was the reason for the old <1.25 cap). language_model.py only uses stable APIs.
+numpy>=1.25.2,<3.0.0
 beem>=0.24.26
 flask>=3.0.0
 gunicorn>=22.0.0
 
-# Intent routing + learning-file validation.
-# semantic-router is optional: without it (or without a working local encoder)
-# intent_learner.py falls back to token overlap. FastEmbed keeps it torch-free.
+# Learning-file validation (my_ai/learning_schemas.py).
 pydantic>=2.0
-semantic-router>=0.0.60
-# fastembed>=0.3.0  # uncomment to use the torch-free ONNX encoder
+
+# Intent routing (intent_learner.py). Optional at runtime: without this package
+# (or without a usable local encoder) the learner falls back to token overlap.
+# 1.x renamed the router API; intent_learner.py supports both 0.0.x and 1.x.
+semantic-router>=1.0.0
+# fastembed>=0.3.0  # uncomment to use the torch-free ONNX encoder instead of torch
 
 # Autonomous learning helpers (optional, free, no API keys).
 duckduckgo-search>=6.0.0

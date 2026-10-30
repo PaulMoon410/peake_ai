@@ -2,7 +2,10 @@ services:
   - type: web
     name: peakebot-web
     env: python
+    # Pinned so prebuilt wheels (numpy>=1.25.2, scikit-learn, pydantic) always
+    # exist for this version; matches the version used for deployment.
+    pythonVersion: "3.11.9"
     plan: free
-    buildCommand: pip install -r requirements.txt -r requirements-integrations.txt -r requirements-memory.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: gunicorn -w 1 -k gthread -b 0.0.0.0:$PORT web_app:app
     autoDeploy: true
