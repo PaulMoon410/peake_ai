@@ -1013,6 +1013,13 @@ def api_chat() -> Response:
 
     if prompt.lower().startswith("/selftalk"):
         topic = prompt[len("/selftalk"):].strip() or "general knowledge"
+        try:
+            from my_ai.autonomous_self_talk import PeakeSelfTalkEngine
+            engine = PeakeSelfTalkEngine()
+            engine.execute_self_talk_command(cycles=1, curriculum_topic=topic)
+        except Exception as exc:
+            return jsonify({"error": f"self-talk failed: {exc}"}), 500
+
         def run_selftalk():
             import time
             from my_ai.autonomous_self_talk import PeakeSelfTalkEngine
