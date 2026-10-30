@@ -1014,7 +1014,7 @@ def api_chat() -> Response:
     if prompt.lower().startswith("/selftalk"):
         topic = prompt[len("/selftalk"):].strip() or "general knowledge"
         try:
-            from autonomous_self_talk import PeakeSelfTalkEngine
+            from my_ai.autonomous_self_talk import PeakeSelfTalkEngine
             PeakeSelfTalkEngine().execute_self_talk_command(cycles=2, curriculum_topic=topic)
             return jsonify({"response": f"Self-talk completed on: {topic}"})
         except Exception as exc:
