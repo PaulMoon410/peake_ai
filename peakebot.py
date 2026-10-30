@@ -66,7 +66,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
-GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-1.5-flash").strip()
+GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-3.8-flash").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
@@ -90,7 +90,7 @@ OPENROUTER_MODELS = [
 GOOGLE_MODELS = [
     m.strip() for m in os.getenv(
         "GOOGLE_MODELS",
-        "gemini-1.5-flash,gemini-2.0-flash,gemini-1.5-pro",
+        "gemini-3.8-flash",
     ).split(",") if m.strip()
 ]
 FTP_UPLOAD_BATCH_SIZE = int(os.getenv("FTP_UPLOAD_BATCH_SIZE", "3"))
