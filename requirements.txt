@@ -13,5 +13,4 @@ semantic-router>=0.0.60
 # fastembed>=0.3.0  # uncomment to use the torch-free ONNX encoder
 
 # Autonomous learning helpers (optional, free, no API keys).
-crawl4ai>=0.4.0
 duckduckgo-search>=6.0.0
