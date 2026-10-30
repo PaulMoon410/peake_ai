@@ -78,6 +78,36 @@ class SelfTalkDialogue:
         self.path = Path(path)
         self._lock = threading.Lock()
         self.turns: List[Dict[str, Any]] = self._load()
+        self.current_learning_objective = self._get_current_learning_objective()
+        
+    def _get_current_learning_objective(self) -> str:
+        """Get the current learning objective or generate a new one."""
+        # Check if we have a stored objective in the last few turns
+        for turn in reversed(self.recent(10)):
+            if turn.get("learning_objective"):
+                return str(turn["learning_objective"])
+        
+        # If no stored objective, pick a new one
+        index = sum(1 for t in self.recent(MAX_TURNS_KEPT) if t.get("role") == "instructor")
+        disciplines = [
+            "English grammar", "writing skills", "reading comprehension", 
+            "vocabulary building", "sentence structure", "communication",
+            "literary analysis", "language mechanics", "rhetoric", "composition"
+        ]
+        return disciplines[index % len(disciplines)]
+        
+    def _update_learning_objective(self) -> None:
+        """Update the learning objective periodically."""
+        # Change learning objective every 3 turns
+        instructor_turns = [t for t in self.recent(MAX_TURNS_KEPT) if t.get("role") == "instructor"]
+        if len(instructor_turns) % 3 == 0:
+            index = sum(1 for t in self.recent(MAX_TURNS_KEPT) if t.get("role") == "instructor")
+            disciplines = [
+                "English grammar", "writing skills", "reading comprehension", 
+                "vocabulary building", "sentence structure", "communication",
+                "literary analysis", "language mechanics", "rhetoric", "composition"
+            ]
+            self.current_learning_objective = disciplines[index % len(disciplines)]
 
     # -- persistence -----------------------------------------------------
     def _load(self) -> List[Dict[str, Any]]:
@@ -213,13 +243,13 @@ class PeakeSelfTalkEngine:
             "failures": result.get("failures", {}) or {},
         }
 
-    def _critique(self, topic: str, question: str, answers: Dict[str, str]) -> str:
+    def _critique(self, topic: str, learning_objective: str, answers: Dict[str, str]) -> str:
         if len(answers) < 2:
             return ""
         listing = "\n".join(f"{name}: {text[:800]}" for name, text in answers.items())
         messages = [
             ("system", self.critic_system),
-            ("user", f"Topic: {topic}\n\nQuestion: {question}\n\nCandidate answers:\n{listing}"),
+            ("user", f"Topic: {topic}\n\nLearning Objective: {learning_objective}\n\nCandidate answers:\n{listing}"),
         ]
         result = self._ask(messages, "single") or {}
         return str(result.get("answer") or "").strip()
@@ -242,40 +272,62 @@ class PeakeSelfTalkEngine:
         """Advance the dialogue by one turn (instructor sets the question, then the learner answers)."""
         topic = self._pick_topic()
         transcript = self.dialogue.transcript()
-
-        instructor_messages = [("system", self.instructor_system)]
-        if transcript:
-            instructor_messages.append(("user", f"Topic: {topic}\n\nDialogue so far:\n{transcript}\n\nContinue the lesson."))
+        
+        # Get the current learning objective
+        learning_objective = self.dialogue.current_learning_objective
+        
+        # Determine which bot is speaking (alternate between turns)
+        is_bot1_turn = len([t for t in self.dialogue.recent(MAX_TURNS_KEPT) if t.get("role") == "instructor"]) % 2 == 0
+        
+        if is_bot1_turn:
+            # Bot 1 (Expert) speaks
+            instructor_messages = [("system", self.instructor_system)]
+            if transcript:
+                prompt = f"Topic: {topic}\n\nLearning Objective: {learning_objective}\n\nDialogue so far:\n{transcript}\n\nContinue the lesson."
+            else:
+                prompt = f"Topic: {topic}\n\nLearning Objective: {learning_objective}\n\nBegin the lesson."
+            instructor_messages.append(("user", prompt))
         else:
-            instructor_messages.append(("user", f"Topic: {topic}\n\nBegin the lesson."))
+            # Bot 2 (Learner) speaks
+            learner_messages = [("system", self.learner_system)]
+            prompt = f"Topic: {topic}\n\nLearning Objective: {learning_objective}\n\nDialogue so far:\n{self.dialogue.transcript()}\n\nAnswer the Instructor."
+            learner_messages.append(("user", prompt))
+            
+            # Get the learner's answer
+            answer_turn = self._consult(learner_messages)
+            answer = answer_turn["text"]
+            self.dialogue.add(
+                "learner", answer, topic=topic, provider=answer_turn["provider"],
+                agreement=answer_turn["agreement"], models=answer_turn["answers"],
+                learning_objective=learning_objective
+            )
+            # Check the answer *after* it is recorded, so the log reads in order.
+            critique = self._critique(topic, learning_objective, answer_turn["answers"]) if answer else ""
+            if critique:
+                self.dialogue.add("critic", critique, topic=topic, provider="critic")
+            if answer:
+                self.log_learned_fact(
+                    f"{topic}: {answer[:280]}",
+                    corroboration=answer_turn["agreement"],
+                    provider=answer_turn["provider"],
+                )
+            
+            # Update learning objective periodically
+            if len([t for t in self.dialogue.recent(MAX_TURNS_KEPT) if t.get("role") == "instructor"]) % 3 == 0:
+                self.dialogue._update_learning_objective()
+            
+            return {"topic": topic, "question": learning_objective, "answer": answer, "critique": critique}
+            
+        # Get the instructor's question
         question_turn = self._consult(instructor_messages)
         question = question_turn["text"] or f"What do we already know about {topic}?"
         self.dialogue.add(
             "instructor", question, topic=topic, provider=question_turn["provider"],
             agreement=question_turn["agreement"], models=question_turn["answers"],
+            learning_objective=learning_objective
         )
-
-        learner_messages = [
-            ("system", self.learner_system),
-            ("user", f"Topic: {topic}\n\nDialogue so far:\n{self.dialogue.transcript()}\n\nAnswer the Instructor."),
-        ]
-        answer_turn = self._consult(learner_messages)
-        answer = answer_turn["text"]
-        self.dialogue.add(
-            "learner", answer, topic=topic, provider=answer_turn["provider"],
-            agreement=answer_turn["agreement"], models=answer_turn["answers"],
-        )
-        # Check the answer *after* it is recorded, so the log reads in order.
-        critique = self._critique(topic, question, answer_turn["answers"]) if answer else ""
-        if critique:
-            self.dialogue.add("critic", critique, topic=topic, provider="critic")
-        if answer:
-            self.log_learned_fact(
-                f"{topic}: {answer[:280]}",
-                corroboration=answer_turn["agreement"],
-                provider=answer_turn["provider"],
-            )
-        return {"topic": topic, "question": question, "answer": answer, "critique": critique}
+        
+        return {"topic": topic, "question": question, "answer": "", "critique": ""}
 
     # Kept so existing callers (``/selftalk`` command, CLI) keep working.
     def execute_self_talk_command(self, cycles: int, curriculum_topic: str = "") -> List[Dict[str, Any]]:
