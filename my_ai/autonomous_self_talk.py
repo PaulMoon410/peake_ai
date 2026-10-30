@@ -20,7 +20,7 @@ class PeakeSelfTalkEngine:
 
     def _call(self, system_prompt, user_message):
         prompt = f"{system_prompt}\n\nUser: {user_message}\nAssistant:"
-        return generate_response(prompt, max_length=256, temperature=0.7).strip()
+        return generate_response(prompt).strip()
 
     def log_learned_fact(self, fact_text):
         buffer = []
