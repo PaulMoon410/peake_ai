@@ -3608,6 +3608,7 @@ def _search_web_verified_answer(query: str) -> str | None:
 
 
 _AI_PROVIDERS = [
+    ("g4f", "_ai_chat_g4f"),  # Try g4f first
     ("openai", "_ai_chat_openai"),
     ("openrouter", "_ai_chat_openrouter"),
     ("anthropic", "_ai_chat_anthropic"),
@@ -3616,7 +3617,6 @@ _AI_PROVIDERS = [
     ("deepseek", "_ai_chat_deepseek"),
     ("mistral", "_ai_chat_mistral"),
     ("perplexity", "_ai_chat_perplexity"),
-    ("g4f", "_ai_chat_g4f"),  # Fallback when all other providers fail
 ]
 
 # Providers preferred ahead of the default order. Set AI_PROVIDER_ORDER="groq,google"
@@ -4052,9 +4052,6 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
 
     # First try all API-based providers
     for provider_name, func_name in _ordered_ai_providers():
-        if provider_name == "g4f":
-            continue  # Skip g4f for now, we'll try it later
-
         result["tried"].append(provider_name)
 
         # Skip providers without an API key, but record why so the user sees
@@ -4069,7 +4066,7 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
             "mistral": MISTRAL_API_KEY,
             "perplexity": PERPLEXITY_API_KEY,
         }.get(provider_name, "")
-        if not key_var:
+        if provider_name != "g4f" and not key_var:
             result["failures"][provider_name] = "no API key configured"
             print(f"⚠️ AI provider {provider_name} skipped: no API key configured")
             continue
