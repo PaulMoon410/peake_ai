@@ -13,7 +13,7 @@ pydantic>=2.0
 # Intent routing (intent_learner.py). Optional at runtime: without this package
 # (or without a usable local encoder) the learner falls back to token overlap.
 # 1.x renamed the router API; intent_learner.py supports both 0.0.x and 1.x.
-semantic-router>=1.0.0
+semantic-router>=0.0.1,<1.0
 # fastembed>=0.3.0  # uncomment to use the torch-free ONNX encoder instead of torch
 
 # Autonomous learning helpers (optional, free, no API keys).
