@@ -1,3 +1,4 @@
+import logging
 #!/usr/bin/env python3
 """
 g4f integration for the AI system.
