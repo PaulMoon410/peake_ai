@@ -39,7 +39,7 @@ except (ImportError, Exception):
     pass
 
 from my_ai.bot_builder import generate_bot, list_templates
-from coding_agent import run_coding_agent
+from my_ai.coding_agent import run_coding_agent
 from math_learner import MathLearner
 from memory_store import MemoryLanguage, MemoryStore
 from games import Game, GAMES, create as create_game, list_games
