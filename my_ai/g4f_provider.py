@@ -5,30 +5,40 @@ g4f integration for the AI system.
 Provides free access to various AI models through the g4f library.
 """
 
-import g4f
 import logging
 from typing import Dict, Any, Optional
+
+try:
+    from g4f.client import Client
+    G4F_AVAILABLE = True
+except ImportError:
+    G4F_AVAILABLE = False
+    logging.warning("g4f package not installed. Install with: pip install -U g4f[all]")
 
 logger = logging.getLogger(__name__)
 
 def _ai_chat_g4f(system_prompt: str, user_prompt: str, model: str = None) -> Optional[str]:
     """
-    Query the g4f service for AI responses.
+    Query the g4f service for AI responses using the standardized client.
 
     Args:
         system_prompt: System instruction for the AI
         user_prompt: User message/query
-        model: Optional specific model to use
+        model: Optional specific model to use (e.g., "gpt-4o", "deepseek-v3", "gemini-pro")
 
     Returns:
         AI response text or None if failed
     """
-    try:
-        # Combine system and user prompts
-        full_prompt = f"System: {system_prompt}\n\nUser: {user_prompt}"
+    if not G4F_AVAILABLE:
+        logger.error("g4f package not available")
+        return None
 
-        # Try to get a response from g4f
-        response = g4f.ChatCompletion.create(
+    try:
+        # Initialize the standardized G4F client
+        client = Client()
+
+        # Create a chat completion request
+        response = client.chat.completions.create(
             model=model or "gpt-3.5-turbo",  # Default model
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -37,12 +47,13 @@ def _ai_chat_g4f(system_prompt: str, user_prompt: str, model: str = None) -> Opt
             # Optional parameters
             temperature=0.7,
             top_p=0.9,
-            frequency_penalty=0,
-            presence_penalty=0,
+            stream=False,  # Set to True for streaming if needed
         )
 
+        # Extract the response content
+        content = response.choices[0].message.content
         logger.info(f"g4f response received using model: {model or 'default'}")
-        return str(response).strip()
+        return str(content).strip() if content else None
 
     except Exception as e:
         logger.error(f"g4f query failed: {str(e)}")
@@ -63,11 +74,11 @@ def _query_g4f_models(system_prompt: str, user_prompt: str) -> Dict[str, str]:
 
     # List of models to try with g4f
     models_to_try = [
-        "gpt-3.5-turbo",
-        "gpt-4",
-        "gpt-4-turbo",
-        "llama",
-        "llama-2-7b-chat",
+        "gpt-4o",  # Default high-quality model
+        "gpt-3.5-turbo",  # Fast model
+        "deepseek-v3",  # Alternative model
+        "gemini-pro",  # Google model
+        "llama",  # Meta model
     ]
 
     for model in models_to_try:
