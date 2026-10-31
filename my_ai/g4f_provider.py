@@ -38,7 +38,6 @@ def _ai_chat_g4f(system_prompt: str, user_prompt: str, model: str = None) -> Opt
         # Initialize the standardized G4F client with retry settings
         client = Client(
             # Provider selection to avoid blocked providers
-            provider=g4f.Provider.GptGo,
         )
 
         # Create a chat completion request with retry logic
@@ -109,7 +108,6 @@ def _ai_chat_g4f(system_prompt: str, user_prompt: str, model: str = None) -> Opt
                 # Try one more fallback provider
                 try:
                     client = Client(
-                        provider=g4f.Provider.GptGo,
                     )
                     response = client.chat.completions.create(
                         model=model or "gpt-3.5-turbo",
