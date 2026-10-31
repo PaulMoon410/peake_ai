@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import re
 import threading
 import time
@@ -34,6 +35,17 @@ from peakebot import (
 from my_ai.integrations.integration_manager import IntegrationManager
 from my_ai.memory_organizer import sync_and_organize, HttpRecallCoordinator
 from my_ai.daily_ecency_poster import start_daily_poster, post_daily_update
+
+
+# Load .env if present (no external dependency).
+_env = Path(__file__).resolve().parent / ".env"
+if _env.is_file():
+    for _line in _env.read_text().splitlines():
+        _line = _line.strip()
+        if not _line or _line.startswith("#") or "=" not in _line:
+            continue
+        _k, _v = _line.split("=", 1)
+        os.environ.setdefault(_k.strip(), _v.strip())
 
 app = Flask(__name__)
 
