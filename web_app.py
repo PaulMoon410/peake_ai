@@ -507,6 +507,8 @@ def index() -> Response:
       selfTalkTimer = setInterval(pollSelfTalk, SELF_TALK_POLL_MS);
       void pollSelfTalk();
     }
+
+    function updateQueueStatus(activeText = null) {
       if (activeText !== null) activeStatus = activeText;
       const pending = messageQueue.length;
       if (processingQueue) {
