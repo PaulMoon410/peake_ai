@@ -38,7 +38,7 @@ try:
 except (ImportError, Exception):
     pass
 
-from bot_builder import generate_bot, list_templates
+from my_ai.bot_builder import generate_bot, list_templates
 from coding_agent import run_coding_agent
 from math_learner import MathLearner
 from memory_store import MemoryLanguage, MemoryStore
