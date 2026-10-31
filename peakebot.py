@@ -4312,19 +4312,6 @@ def generate_response(prompt, conversation_history=None):
         except Exception as exc:
             print(f"⚠️ g4f fallback failed: {exc}")
 
-    # If all other providers failed, try the local model as a final fallback
-    print("⚠️ All AI providers failed, attempting local model fallback...")
-    try:
-        from my_ai.assistant import ask_model
-        local_answer = ask_model(prompt, system, memory_context)
-        if local_answer:
-            storage = _store_ai_chat(prompt, local_answer, "local")
-            local_answer = local_answer.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
-            remember(prompt, local_answer)
-            return f"{local_answer}\n\n(Answered via local model fallback; {storage}.)"
-    except Exception as exc:
-        print(f"⚠️ Local model fallback failed: {exc}")
-
     memory_query = raw_prompt
     previous_user = next((item["content"] for item in reversed(history) if item["role"] == "user"), "")
     if previous_user:
