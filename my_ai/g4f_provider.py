@@ -80,7 +80,7 @@ def _ai_chat_g4f(system_prompt: str, user_prompt: str, model: str = None) -> Opt
             try:
                 # Try with a different provider that might be working
                 client = Client(
-                    provider=g4f.Provider.You,
+                    provider=getattr(g4f.Provider, "GptGo", None) or g4f.Provider.You,
                 )
                 response = client.chat.completions.create(
                     model=model or "gpt-3.5-turbo",
