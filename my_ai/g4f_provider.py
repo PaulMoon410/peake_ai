@@ -57,9 +57,20 @@ def _ai_chat_g4f(system_prompt: str, user_prompt: str, model: str = None) -> Opt
         )
 
         # Extract the response content
-        content = response.choices[0].message.content
-        logger.info(f"g4f response received using model: {model or 'default'}")
-        return str(content).strip() if content else None
+        try:
+            content = response.choices[0].message.content
+            logger.info(f"g4f response received using model: {model or 'default'}")
+            return str(content).strip() if content else None
+        except (IndexError, AttributeError) as e:
+            logger.error(f"g4f response format error: {e}")
+            # Try alternative response format
+            try:
+                content = response.choices[0].text
+                logger.info(f"g4f response received (alternative format) using model: {model or 'default'}")
+                return str(content).strip() if content else None
+            except Exception as e2:
+                logger.error(f"g4f alternative response format also failed: {e2}")
+                return None
 
     except Exception as e:
         error_msg = str(e).lower()
@@ -80,9 +91,19 @@ def _ai_chat_g4f(system_prompt: str, user_prompt: str, model: str = None) -> Opt
                     ],
                     ignore_ssl_verification=True,
                 )
-                content = response.choices[0].message.content
-                logger.info("g4f response received using alternative provider")
-                return str(content).strip() if content else None
+                try:
+                    content = response.choices[0].message.content
+                    logger.info("g4f response received using alternative provider")
+                    return str(content).strip() if content else None
+                except (IndexError, AttributeError) as e:
+                    logger.error(f"g4f alternative provider response format error: {e}")
+                    try:
+                        content = response.choices[0].text
+                        logger.info("g4f response received (alternative format) using alternative provider")
+                        return str(content).strip() if content else None
+                    except Exception as e2:
+                        logger.error(f"g4f alternative provider response format also failed: {e2}")
+                        return None
             except Exception as e2:
                 logger.warning(f"g4f alternative provider also failed: {str(e2)[:100]}")
                 # Try one more fallback provider
@@ -98,9 +119,19 @@ def _ai_chat_g4f(system_prompt: str, user_prompt: str, model: str = None) -> Opt
                         ],
                         ignore_ssl_verification=True,
                     )
-                    content = response.choices[0].message.content
-                    logger.info("g4f response received with final fallback provider")
-                    return str(content).strip() if content else None
+                    try:
+                        content = response.choices[0].message.content
+                        logger.info("g4f response received with final fallback provider")
+                        return str(content).strip() if content else None
+                    except (IndexError, AttributeError) as e:
+                        logger.error(f"g4f final fallback provider response format error: {e}")
+                        try:
+                            content = response.choices[0].text
+                            logger.info("g4f response received (alternative format) with final fallback provider")
+                            return str(content).strip() if content else None
+                        except Exception as e2:
+                            logger.error(f"g4f final fallback provider response format also failed: {e2}")
+                            return None
                 except Exception as e3:
                     logger.error(f"All g4f providers failed: {str(e3)}")
                     return None
