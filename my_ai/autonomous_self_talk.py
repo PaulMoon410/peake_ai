@@ -223,7 +223,16 @@ class PeakeSelfTalkEngine:
             str(k): str(v).strip() for k, v in (result.get("answers") or {}).items()
             if v and str(v).strip()
         }
+        
+        # Log provider successes and failures
+        if result.get("failures"):
+            logging.warning(f"Provider failures: {result['failures']}")
+        
+        if answers:
+            logging.info(f"Provider successes: {list(answers.keys())}")
+        
         if not answers:
+            logging.error("All providers failed to return valid answers")
             return {"text": "", "provider": "", "agreement": 0, "answers": {}, "failures": result.get("failures", {})}
 
         order = result.get("order") or list(answers)
@@ -237,6 +246,8 @@ class PeakeSelfTalkEngine:
             )
             if support > best_support:
                 best, best_support = candidate, support
+        
+        logging.info(f"Selected answer from {best} with corroboration level {best_support}")
         return {
             "text": answers.get(best, ""),
             "provider": best,
@@ -247,14 +258,23 @@ class PeakeSelfTalkEngine:
 
     def _critique(self, topic: str, learning_objective: str, answers: Dict[str, str]) -> str:
         if len(answers) < 2:
+            logging.info("Skipping critique - not enough candidate answers to compare")
             return ""
+            
+        logging.info(f"Starting critique for learning objective: {learning_objective}")
         listing = "\n".join(f"{name}: {text[:800]}" for name, text in answers.items())
         messages = [
             ("system", self.critic_system),
             ("user", f"Topic: {topic}\n\nLearning Objective: {learning_objective}\n\nCandidate answers:\n{listing}"),
         ]
         result = self._ask(messages, "single") or {}
-        return str(result.get("answer") or "").strip()
+        
+        if result and result.get("answer"):
+            logging.info("Critique successfully generated")
+            return str(result.get("answer") or "").strip()
+        else:
+            logging.error("Failed to generate critique")
+            return ""
 
     # -- the loop --------------------------------------------------------
     def _pick_topic(self) -> str:
@@ -272,17 +292,22 @@ class PeakeSelfTalkEngine:
 
     def next_turn(self) -> Dict[str, Any]:
         """Advance the dialogue by one turn (instructor sets the question, then the learner answers)."""
+        logging.info("Starting new conversation turn")
         topic = self._pick_topic()
         transcript = self.dialogue.transcript()
         
         # Get the current learning objective
         learning_objective = self.dialogue.current_learning_objective
+        logging.info(f"Current topic: {topic}, Learning objective: {learning_objective}")
         
         # Determine which bot is speaking (alternate between turns)
         is_bot1_turn = len([t for t in self.dialogue.recent(MAX_TURNS_KEPT) if t.get("role") == "instructor"]) % 2 == 0
+        speaker = "Instructor (Expert)" if is_bot1_turn else "Learner"
+        logging.info(f"Current speaker: {speaker}")
         
         if is_bot1_turn:
             # Bot 1 (Expert) speaks
+            logging.info("Instructor preparing question...")
             instructor_messages = [("system", self.instructor_system)]
             if transcript:
                 prompt = f"Topic: {topic}\n\nLearning Objective: {learning_objective}\n\nDialogue so far:\n{transcript}\n\nContinue the lesson."
@@ -291,6 +316,7 @@ class PeakeSelfTalkEngine:
             instructor_messages.append(("user", prompt))
         else:
             # Bot 2 (Learner) speaks
+            logging.info("Learner preparing answer...")
             learner_messages = [("system", self.learner_system)]
             prompt = f"Topic: {topic}\n\nLearning Objective: {learning_objective}\n\nDialogue so far:\n{self.dialogue.transcript()}\n\nAnswer the Instructor."
             learner_messages.append(("user", prompt))
@@ -298,6 +324,8 @@ class PeakeSelfTalkEngine:
             # Get the learner's answer
             answer_turn = self._consult(learner_messages)
             answer = answer_turn["text"]
+            logging.info(f"Learner response length: {len(answer) if answer else 0} characters")
+            
             self.dialogue.add(
                 "learner", answer, topic=topic, provider=answer_turn["provider"],
                 agreement=answer_turn["agreement"], models=answer_turn["answers"],
@@ -316,6 +344,7 @@ class PeakeSelfTalkEngine:
             
             # Update learning objective periodically
             if len([t for t in self.dialogue.recent(MAX_TURNS_KEPT) if t.get("role") == "instructor"]) % 3 == 0:
+                logging.info("Updating learning objective...")
                 self.dialogue._update_learning_objective()
             
             return {"topic": topic, "question": learning_objective, "answer": answer, "critique": critique}
@@ -323,6 +352,8 @@ class PeakeSelfTalkEngine:
         # Get the instructor's question
         question_turn = self._consult(instructor_messages)
         question = question_turn["text"] or f"What do we already know about {topic}?"
+        logging.info(f"Instructor question length: {len(question)} characters")
+        
         self.dialogue.add(
             "instructor", question, topic=topic, provider=question_turn["provider"],
             agreement=question_turn["agreement"], models=question_turn["answers"],
