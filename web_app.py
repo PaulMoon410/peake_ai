@@ -138,14 +138,6 @@ def _start_model_warmup() -> None:
     print("[startup] Own language model warm-up started in background.", flush=True)
     warm_language_model()
 
-    # Start the local model server as well
-    try:
-      print("[startup] Starting local model server...", flush=True)
-      from my_ai.assistant import ensure_model_server
-      ensure_model_server()
-      print("[startup] Local model server started successfully.", flush=True)
-    except Exception as exc:
-      print(f"[startup] Local model server failed to start: {exc}", flush=True)
 
   threading.Thread(target=warm, name="model-warmup", daemon=True).start()
 
@@ -170,14 +162,6 @@ def _kickoff_ftp_startup_check() -> None:
   _start_model_warmup()
   _start_daily_ecency_poster()
   _start_keepalive_learning()
-
-  # Ensure the local model server is started
-  try:
-    from my_ai.assistant import ensure_model_server
-    ensure_model_server()
-    print("[startup] Local model server is ready.", flush=True)
-  except Exception as exc:
-    print(f"[startup] Local model server failed to start: {exc}", flush=True)
 
   if request.path != "/health":
       _touch_user_activity()
@@ -271,16 +255,6 @@ def _add_cors_headers(response: Response) -> Response:
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Admin-Key, X-Trading-Key, X-Api-Key"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
-
-
-@app.teardown_appcontext
-def _shutdown_local_model_server(exception=None):
-    """Stop the local model server when the application shuts down."""
-    try:
-        from my_ai.assistant import stop_model_server
-        stop_model_server()
-    except Exception:
-        pass
 
 
 @app.get("/api/memory")
