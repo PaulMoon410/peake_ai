@@ -3616,7 +3616,7 @@ _AI_PROVIDERS = [
     ("deepseek", "_ai_chat_deepseek"),
     ("mistral", "_ai_chat_mistral"),
     ("perplexity", "_ai_chat_perplexity"),
-    ("g4f", "_ai_chat_g4f"),
+    ("g4f", "_ai_chat_g4f"),  # Fallback when all other providers fail
 ]
 
 # Providers preferred ahead of the default order. Set AI_PROVIDER_ORDER="groq,google"
@@ -4053,32 +4053,48 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
         result["tried"].append(provider_name)
         # Skip providers without an API key, but record why so the user sees
         # exactly which ones were bypassed instead of silently ignored.
-        key_var = {
-            "openai": OPENAI_API_KEY,
-            "openrouter": OPENROUTER_API_KEY,
-            "anthropic": ANTHROPIC_API_KEY,
-            "google": GOOGLE_API_KEY,
-            "groq": GROQ_API_KEY,
-            "deepseek": DEEPSEEK_API_KEY,
-            "mistral": MISTRAL_API_KEY,
-            "perplexity": PERPLEXITY_API_KEY,
-        }.get(provider_name, "")
-        if not key_var:
-            result["failures"][provider_name] = "no API key configured"
-            print(f"⚠️ AI provider {provider_name} skipped: no API key configured")
-            continue
-        try:
-            func = globals()[func_name]
-            answer = func(system, user)
-            if answer:
-                result["answer"] = answer
-                result["provider"] = provider_name
-                return result
-        except Exception as exc:
-            msg = f"{type(exc).__name__}: {str(exc)[:120]}"
-            result["failures"][provider_name] = msg
-            print(f"⚠️ AI provider {provider_name} failed: {msg}")
-            continue
+        if provider_name == "g4f":
+            # g4f doesn't require an API key, always try it
+            try:
+                func = globals()[func_name]
+                answer = func(system, user)
+                if answer:
+                    result["answer"] = answer
+                    result["provider"] = provider_name
+                    return result
+            except Exception as exc:
+                msg = f"{type(exc).__name__}: {str(exc)[:120]}"
+                result["failures"][provider_name] = msg
+                print(f"⚠️ AI provider {provider_name} failed: {msg}")
+                continue
+        else:
+            # Other providers need API keys
+            key_var = {
+                "openai": OPENAI_API_KEY,
+                "openrouter": OPENROUTER_API_KEY,
+                "anthropic": ANTHROPIC_API_KEY,
+                "google": GOOGLE_API_KEY,
+                "groq": GROQ_API_KEY,
+                "deepseek": DEEPSEEK_API_KEY,
+                "mistral": MISTRAL_API_KEY,
+                "perplexity": PERPLEXITY_API_KEY,
+            }.get(provider_name, "")
+            if not key_var:
+                result["failures"][provider_name] = "no API key configured"
+                print(f"⚠️ AI provider {provider_name} skipped: no API key configured")
+                continue
+            try:
+                func = globals()[func_name]
+                answer = func(system, user)
+                if answer:
+                    result["answer"] = answer
+                    result["provider"] = provider_name
+                    return result
+            except Exception as exc:
+                msg = f"{type(exc).__name__}: {str(exc)[:120]}"
+                result["failures"][provider_name] = msg
+                print(f"⚠️ AI provider {provider_name} failed: {msg}")
+                continue
     return result
 
 
@@ -4267,6 +4283,21 @@ def generate_response(prompt, conversation_history=None):
             provider_note = f"\n\n(AI providers tried: {', '.join(failed_list)} — all unavailable right now.)"
         else:
             provider_note = f"\n\n(AI providers tried: {', '.join(tried)} — none returned an answer.)"
+
+    # If no providers were tried, try g4f explicitly as a fallback
+    if not tried and "g4f" not in failures:
+        print("⚠️ No AI providers tried, attempting g4f fallback...")
+        try:
+            ai_result = _ai_chat_completion(prompt, memory_context)
+            ai_answer = ai_result.get("answer")
+            ai_provider = ai_result.get("provider")
+            if ai_answer:
+                storage = _store_ai_chat(prompt, ai_answer, ai_provider or "unknown")
+                ai_answer = ai_answer.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
+                remember(prompt, ai_answer)
+                return f"{ai_answer}\n\n(Answered via {ai_provider} fallback; {storage}.)"
+        except Exception as exc:
+            print(f"⚠️ g4f fallback failed: {exc}")
 
     memory_query = raw_prompt
     previous_user = next((item["content"] for item in reversed(history) if item["role"] == "user"), "")
