@@ -40,10 +40,10 @@ except (ImportError, Exception):
 
 from my_ai.bot_builder import generate_bot, list_templates
 from my_ai.coding_agent import run_coding_agent
-from math_learner import MathLearner
-from memory_store import MemoryLanguage, MemoryStore
-from games import Game, GAMES, create as create_game, list_games
-from hive_bot import fetch_hive_bot_status
+from my_ai.math_learner import MathLearner
+from my_ai.memory_store import MemoryLanguage, MemoryStore
+from my_ai.games import Game, GAMES, create as create_game, list_games
+from my_ai.hive_bot import fetch_hive_bot_status
 
 ROOT = Path(__file__).resolve().parent
 MEMORY = MemoryStore(ROOT / "memory.jsonl", ROOT / "memory.md")
