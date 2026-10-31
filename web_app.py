@@ -11,6 +11,16 @@ from datetime import datetime, timedelta
 from flask import Flask, jsonify, request, Response
 from my_ai.conversation import normalize_history
 
+# Load .env if present (no external dependency).
+_env_path = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.isfile(_env_path):
+    for _line in open(_env_path).read().splitlines():
+        _line = _line.strip()
+        if not _line or _line.startswith("#") or "=" not in _line:
+            continue
+        _k, _v = _line.split("=", 1)
+        os.environ.setdefault(_k.strip(), _v.strip())
+
 from peakebot import (
   _get_mcf_memory_store,
   _ftp_connect_for_upload,
@@ -36,16 +46,6 @@ from my_ai.integrations.integration_manager import IntegrationManager
 from my_ai.memory_organizer import sync_and_organize, HttpRecallCoordinator
 from my_ai.daily_ecency_poster import start_daily_poster, post_daily_update
 
-
-# Load .env if present (no external dependency).
-_env = Path(__file__).resolve().parent / ".env"
-if _env.is_file():
-    for _line in _env.read_text().splitlines():
-        _line = _line.strip()
-        if not _line or _line.startswith("#") or "=" not in _line:
-            continue
-        _k, _v = _line.split("=", 1)
-        os.environ.setdefault(_k.strip(), _v.strip())
 
 app = Flask(__name__)
 
