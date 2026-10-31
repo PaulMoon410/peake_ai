@@ -79,9 +79,14 @@ def _ai_chat_g4f(system_prompt: str, user_prompt: str, model: str = None) -> Opt
             # Try with a different provider
             try:
                 # Try with a different provider that might be working
-                client = Client(
-                    provider=getattr(g4f.Provider, "GptGo", None) or g4f.Provider.You,
-                )
+                try:
+                    # First try to get GptGo provider if it exists
+                    gptgo_provider = getattr(g4f.Provider, "GptGo", None)
+                    provider = gptgo_provider or g4f.Provider.You
+                    client = Client(provider=provider)
+                except Exception as e:
+                    logger.warning(f"Failed to use specific providers, falling back to default: {str(e)}")
+                    client = Client()
                 response = client.chat.completions.create(
                     model=model or "gpt-3.5-turbo",
                     messages=[
