@@ -16,6 +16,8 @@ import re
 import requests
 from language_model import NeuralLanguageModel, create_training_data
 from typing import TYPE_CHECKING, Any
+# Import g4f provider
+from my_ai.g4f_provider import _ai_chat_g4f
 if TYPE_CHECKING:
     from intent_learner import IntentLearner
 from my_ai.conversation import (
@@ -3614,6 +3616,7 @@ _AI_PROVIDERS = [
     ("deepseek", "_ai_chat_deepseek"),
     ("mistral", "_ai_chat_mistral"),
     ("perplexity", "_ai_chat_perplexity"),
+    ("g4f", "_ai_chat_g4f"),
 ]
 
 # Providers preferred ahead of the default order. Set AI_PROVIDER_ORDER="groq,google"
@@ -4118,6 +4121,7 @@ def _query_ai_providers_for_self_talk(
             "deepseek": DEEPSEEK_API_KEY,
             "mistral": MISTRAL_API_KEY,
             "perplexity": PERPLEXITY_API_KEY,
+            "g4f": "free",  # g4f doesn't require an API key
         }.get(provider_name, "")
         if not key_var:
             continue

@@ -2,6 +2,10 @@
 
 A small personal assistant using Qwen2.5-Coder 0.5B locally with llama.cpp. It has no Python package dependencies. It can answer questions, search the web when asked, remember notes you explicitly save, and generate simple websites for local preview.
 
+### AI Provider Integration
+
+The system supports multiple AI providers including OpenAI, Anthropic, Google, and more. It now also includes g4f integration, which provides free access to various AI models without requiring API keys.
+
 ## Start
 
 This computer is Linux x86_64. The local CPU runtime and model are installed in this folder. Start the assistant with:
