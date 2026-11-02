@@ -3,7 +3,7 @@ import os
 import time
 import threading
 import queue as queue_mod
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 try:
     from zoneinfo import ZoneInfo
@@ -11,15 +11,9 @@ except Exception:
     from backports.zoneinfo import ZoneInfo
 from ftplib import FTP
 import ftplib
-import io
 import re
 import requests
 from language_model import NeuralLanguageModel, create_training_data
-from typing import TYPE_CHECKING, Any
-# Import g4f provider
-from my_ai.g4f_provider import _ai_chat_g4f
-if TYPE_CHECKING:
-    from intent_learner import IntentLearner
 from my_ai.conversation import (
     build_conversation_prompt,
     build_research_prompt,
@@ -27,18 +21,9 @@ from my_ai.conversation import (
     normalize_history,
     research_answer_system_prompt,
 )
-from my_ai.learning_schemas import (
-    LearningItem,
-    load_learning_buffer,
-    load_topics,
-    save_learning_buffer,
-    save_topics,
-)
 from my_ai.math_learner import MathLearner
-from my_ai.memory_store import MemoryStore, _MAX_NOTE_CHARS
-from my_ai.memory_organizer import sync_and_organize, HttpRecallCoordinator, organize_memory
+from my_ai.memory_store import MemoryStore
 from my_ai.trading_bridge import TradingBridge
-from my_ai.integrations.integration_manager import IntegrationManager
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus, urlparse
 import tempfile
@@ -64,46 +49,11 @@ FTP_HOST = os.getenv("FTP_HOST", "<REDACTED_FTP_HOST>").strip()
 FTP_USER = os.getenv("FTP_USER", "<REDACTED_FTP_USER>").strip()
 FTP_PASS = os.getenv("FTP_PASS", "<REDACTED_FTP_PASS>").strip()
 FTP_BASE_DIR = os.getenv("FTP_BASE_DIR", "<REDACTED_FTP_BASE_DIR>").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
-GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-3.8-flash").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
-PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "").strip()
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free").strip()
-# Model IDs to try per provider. Keys without credit/access still rank first when
-# configured, and a 404 on the first model rolls over to the next candidate.
-GROQ_MODELS = [
-    m.strip() for m in os.getenv(
-        "GROQ_MODEL",
-        "openai/gpt-oss-20b,llama-3.3-70b-versatile,openai/gpt-oss-120b",
-    ).split(",") if m.strip()
-]
-OPENROUTER_MODELS = [
-    m.strip() for m in os.getenv(
-        "OPENROUTER_MODELS",
-        "openrouter/free,meta-llama/llama-3.2-3b-instruct:free,nvidia/nemotron-3.5-lightning:free,google/gemma-4-26b-a4b-it:free,openrouter/auto",
-    ).split(",") if m.strip()
-]
-GOOGLE_MODELS = [
-    m.strip() for m in os.getenv(
-        "GOOGLE_MODELS",
-        "gemini-3.8-flash",
-    ).split(",") if m.strip()
-]
+G4F_GO_BASE_URL = os.getenv("G4F_GO_BASE_URL", "").strip()
+G4F_GO_API_KEY = os.getenv("G4F_GO_API_KEY", "").strip()
+G4F_GO_MODEL = os.getenv("G4F_GO_MODEL", "gpt-4o-mini").strip()
 FTP_UPLOAD_BATCH_SIZE = int(os.getenv("FTP_UPLOAD_BATCH_SIZE", "3"))
-# Upload work runs on a background worker so a chat turn never waits on FTP.
-# The queue is capped; if FTP is down the oldest batch is dropped rather than
-# growing without bound, and the startup archive sync recovers anything lost.
-FTP_UPLOAD_QUEUE_MAX_BATCHES = int(os.getenv("FTP_UPLOAD_QUEUE_MAX_BATCHES", "20"))
-FTP_UPLOAD_BACKLOG_MAX_ENTRIES = int(os.getenv("FTP_UPLOAD_BACKLOG_MAX_ENTRIES", "5000"))
-FTP_DAILY_UPLOAD_INTERVAL_SECONDS = int(os.getenv("FTP_DAILY_UPLOAD_INTERVAL_SECONDS", "21600"))
 MODEL_FTP_TIMEOUT_SECONDS = 8
-_FTP_BLOCK_MAX_ATTEMPTS = int(os.getenv("FTP_BLOCK_MAX_ATTEMPTS", "3"))
 LEARNING_QUEUE_FILE = "learning_queue.json"
 LEARNED_TOPICS_FILE = "learned_topics.json"
 KNOWLEDGE_OVERRIDES_FILE = "base_knowledge_overrides.json"
@@ -300,35 +250,7 @@ _MODEL_INITIALIZE_LOCK = threading.Lock()
 _INTENT_LEARNER_LOCK = threading.Lock()
 model: NeuralLanguageModel | None = None
 intent_learner: "IntentLearner | None" = None
-
-# Intent learner constants
-_INTENT_CATEGORY = "Harold/Understanding/Intents"
-_ALLOWED_INTENT_TYPES = frozenset({"math", "remember", "search", "website", "recall_math", "recall_memory"})
-_MAX_INTENT_EXAMPLES_PER_TYPE = 24
-_MIN_INTENT_MATCH_SCORE = 0.4
-from intent_learner import IntentLearner
-
-# Semantic Router (https://github.com/aurelio-labs/semantic-router) is an
-# optional accelerator for intent matching. When it (or its encoder deps) is
-# missing we fall back to the built-in token-overlap scorer, so every helper
-# below must degrade to ``None``/``False`` instead of raising.
-_SEMANTIC_ROUTER_ENABLED = os.getenv("SEMANTIC_ROUTER_ENABLED", "1").strip().lower() not in {
-    "0", "false", "no", "off",
-}
-_SEMANTIC_ROUTER_THRESHOLD = float(os.getenv("SEMANTIC_ROUTER_THRESHOLD", str(_MIN_INTENT_MATCH_SCORE)))
-_SEMANTIC_ROUTER_ROUTE_LIMIT = int(os.getenv("SEMANTIC_ROUTER_ROUTE_LIMIT", "200"))
-_SEMANTIC_ROUTER_LOCK = threading.Lock()
-_SEMANTIC_ROUTER_CACHE: dict = {"signature": None, "router": None}
-
-# Entries are buffered until a batch is full, then handed to the upload worker.
-_FTP_PENDING_ENTRIES: list[dict] = []
-_FTP_PENDING_LOCK = threading.Lock()
-_UPLOAD_QUEUE: queue_mod.Queue | None = None
-_UPLOAD_QUEUE_LOCK = threading.Lock()
-_UPLOAD_STATS_LOCK = threading.Lock()
-_UPLOAD_STATS = {"batches_uploaded": 0, "entries_uploaded": 0, "batches_failed": 0, "last_error": "", "last_success": None}
-_MEMORY_SYNC_STARTED = False
-_MEMORY_SYNC_LOCK = threading.Lock()
+_FTP_PENDING_ENTRIES = []
 
 
 def _initialize_language_model() -> NeuralLanguageModel:
@@ -393,7 +315,7 @@ def warm_language_model() -> None:
         print(f"⚠️ Own language model startup failed: {type(exc).__name__}: {str(exc)[:180]}", flush=True)
 
 
-def _get_intent_learner() -> "IntentLearner":
+def _get_intent_learner() -> IntentLearner:
     """Initialize the intent learner once, lazily, on first chat turn."""
     global intent_learner
     if intent_learner is not None:
@@ -402,121 +324,8 @@ def _get_intent_learner() -> "IntentLearner":
         if intent_learner is None:
             store = _get_mcf_memory_store()
             intent_learner = IntentLearner(store)
-            router = getattr(intent_learner, "router", None)
-            engine = getattr(router, "engine", None) or getattr(intent_learner, "router_engine", "token-overlap")
-            print(f"🎯 Intent learner ready ({len(intent_learner.intents)} intent type(s) loaded, router: {engine}).", flush=True)
+            print(f"🎯 Intent learner ready ({len(intent_learner.intents)} intent type(s) loaded).", flush=True)
         return intent_learner
-
-
-def _semantic_router_import() -> tuple | None:
-    """Load the Semantic Router pieces; ``None`` when unavailable.
-
-    Handles the 0.0.x API (``semantic_router.SemanticRouter``) and the 1.x API
-    (``semantic_router.routers.IndexedRouter``, ``confidence`` instead of
-    ``similarity_score``); an installed version that matches neither is
-    treated as unavailable rather than crashing the turn.
-    """
-    if not _SEMANTIC_ROUTER_ENABLED:
-        return None
-    try:
-        from intent_learner import _load_api
-
-        api = _load_api()
-    except Exception:
-        return None
-    if api is None:
-        return None
-    router_cls, make_encoder = api
-    return router_cls, make_encoder
-
-
-def _semantic_router_identify(query: str) -> tuple[str, float] | None:
-    """Score ``query`` against the learned intents with local embeddings.
-
-    Returns ``(intent_type, similarity)`` only for a learned intent at or above
-    ``_SEMANTIC_ROUTER_THRESHOLD``; ``None`` means "no semantic opinion" and the
-    caller keeps its own token-overlap matching. Never raises: a missing
-    package, model download failure, or bad model output all return ``None``.
-    """
-    if not _SEMANTIC_ROUTER_ENABLED:
-        return None
-    # Score against the live learner even before ``_get_intent_learner`` ran.
-    learner = intent_learner
-    if learner is None:
-        try:
-            learner = _get_intent_learner()
-        except Exception:
-            return None
-    intents = dict(getattr(learner, "intents", None) or {})
-    if not intents:
-        return None
-    try:
-        if len(_tokens(query)) < 2:
-            return None  # too little text for embeddings to be meaningful
-    except Exception:
-        pass
-    # The learner owns the encoder and the version handling; it is the same
-    # routing the inline scorer uses, just called without mutating its state.
-    router = getattr(learner, "router", None)
-    if router is not None and hasattr(router, "route"):
-        try:
-            return router.route(
-                query,
-                {k: v for k, v in intents.items() if k in _ALLOWED_INTENT_TYPES},
-            )
-        except Exception:
-            return None
-    pieces = _semantic_router_import()
-    if pieces is None:
-        return None
-    router_cls, make_encoder = pieces
-    from semantic_router import Route
-
-    def _build(routes):
-        from intent_learner import _build_router
-
-        encoder = make_encoder()
-        if encoder is None:
-            return None
-        return _build_router(router_cls, encoder, routes)
-
-    signature = tuple(
-        (intent_type, tuple(examples[-_MAX_INTENT_EXAMPLES_PER_TYPE:]))
-        for intent_type, examples in sorted(intents.items())
-        if intent_type in _ALLOWED_INTENT_TYPES and examples
-    )
-    if not signature:
-        return None
-    try:
-        with _SEMANTIC_ROUTER_LOCK:
-            if _SEMANTIC_ROUTER_CACHE["signature"] != signature:
-                from intent_learner import _build_route
-
-                routes = [
-                    _build_route(Route, intent_type, list(examples), _SEMANTIC_ROUTER_THRESHOLD)
-                    for intent_type, examples in signature[: _SEMANTIC_ROUTER_ROUTE_LIMIT]
-                ]
-                router = _build(routes)
-                if router is None:
-                    print("⚠️ No local embedding encoder available; Semantic Router disabled (token overlap only).")
-                _SEMANTIC_ROUTER_CACHE["signature"] = signature
-                _SEMANTIC_ROUTER_CACHE["router"] = router
-            router = _SEMANTIC_ROUTER_CACHE["router"]
-        if router is None:
-            return None
-        choice = router(query)
-    except Exception as exc:
-        print(f"⚠️ Semantic Router fell back to token overlap: {type(exc).__name__}: {str(exc)[:160]}")
-        _SEMANTIC_ROUTER_CACHE["router"] = None  # rebuild on the next turn
-        return None
-    from intent_learner import _choice_result
-
-    name, similarity = _choice_result(choice)
-    if name not in _ALLOWED_INTENT_TYPES:
-        return None
-    if similarity < _SEMANTIC_ROUTER_THRESHOLD:
-        return None
-    return name, similarity
 
 
 def _tmp_path(filename: str) -> str:
@@ -799,16 +608,17 @@ def _queue_online_learning(prompt: str, response: str, source: str = "chat"):
         # Track interaction stats, but only learn from stronger samples.
         return
 
-    # Validate through learning_schemas so one bad interaction is rejected here
-    # instead of being written to disk and trained on later.
-    try:
-        item = LearningItem(prompt=prompt, response=response, source=source, quality=quality)
-    except ValueError as exc:
-        print(f"⚠️ Online learning item rejected: {exc}")
-        return
-    items, _dropped = load_learning_buffer(Path(ONLINE_LEARNING_BUFFER_FILE))
-    items.append(item)
-    save_learning_buffer(Path(ONLINE_LEARNING_BUFFER_FILE), items)
+    buffer_data = _load_json_file(ONLINE_LEARNING_BUFFER_FILE, {"items": []})
+    items = buffer_data.get("items", [])
+    items.append({
+        "prompt": prompt,
+        "response": response,
+        "source": source,
+        "quality": quality,
+        "timestamp": datetime.now().isoformat(),
+    })
+    buffer_data["items"] = items[-200:]
+    _save_json_file(ONLINE_LEARNING_BUFFER_FILE, buffer_data)
     _flush_online_learning()
 
 
@@ -816,9 +626,8 @@ def _flush_online_learning(force: bool = False):
     if not ONLINE_LEARNING_ENABLED:
         return
 
-    items, dropped = load_learning_buffer(Path(ONLINE_LEARNING_BUFFER_FILE))
-    if dropped:
-        print(f"⚠️ Dropped {dropped} malformed online learning item(s) from {ONLINE_LEARNING_BUFFER_FILE}")
+    buffer_data = _load_json_file(ONLINE_LEARNING_BUFFER_FILE, {"items": []})
+    items = buffer_data.get("items", [])
     if not items:
         return
 
@@ -846,23 +655,10 @@ def _flush_online_learning(force: bool = False):
     with _MODEL_TRAIN_LOCK:
         for sample in batch:
             try:
-                # Train longer on higher-quality interactions so the model
-                # retains strong signal more durably.
-                epochs = 1 if sample.quality < 0.8 else 2
-                active_model.learn_from_conversation(sample.prompt, sample.response, epochs=epochs)
+                active_model.learn_from_conversation(sample.get("prompt", ""), sample.get("response", ""))
                 learned += 1
             except Exception as e:
                 print(f"⚠️ Online learning sample skipped: {str(e)}")
-
-        # Also grow vocabulary from any queued learning topics via the free
-        # dictionary API, so the model learns new words even without a live chat.
-        topic_buffer = _load_json_file(LEARNED_TOPICS_FILE, {"topics": []})
-        topics = topic_buffer.get("topics", []) if isinstance(topic_buffer, dict) else []
-        for topic in topics[:8]:
-            try:
-                active_model.learn_word(str(topic))
-            except Exception as e:
-                print(f"⚠️ Topic vocabulary learn skipped for {topic!r}: {str(e)}")
 
         if learned > 0:
             try:
@@ -875,7 +671,8 @@ def _flush_online_learning(force: bool = False):
             except Exception as e:
                 print(f"⚠️ Model checkpoint save failed: {str(e)}")
 
-    save_learning_buffer(Path(ONLINE_LEARNING_BUFFER_FILE), remaining)
+    buffer_data["items"] = remaining
+    _save_json_file(ONLINE_LEARNING_BUFFER_FILE, buffer_data)
 
     if learned > 0:
         profile["online_learning_runs"] = int(profile.get("online_learning_runs", 0)) + 1
@@ -883,45 +680,6 @@ def _flush_online_learning(force: bool = False):
         profile["last_online_learning"] = datetime.now().isoformat()
         _save_json_file(GROWTH_PROFILE_FILE, profile)
         print(f"🧠 Online learning updated model with {learned} high-quality interaction(s)")
-
-    # Memory organization runs in the background so chat turns are never blocked.
-    # It deduplicates, re-categorizes, consolidates, and builds an organized
-    # knowledge base on the FTP ``Harold`` directory, with an HTTP cross-check
-    # running concurrently against peake-ai's own API.
-    try:
-        _start_memory_organizer()
-    except Exception as exc:
-        print(f"⚠️ Memory organizer not started: {exc}")
-
-
-def _start_memory_organizer() -> None:
-    """Kick off the memory organizer on a background thread (once per process)."""
-    global _ORGANIZER_STARTED
-    with _ORGANIZER_LOCK:
-        if _ORGANIZER_STARTED:
-            return
-        _ORGANIZER_STARTED = True
-
-    def run() -> None:
-        try:
-            store = _get_mcf_memory_store()
-            http = HttpRecallCoordinator()
-            report = sync_and_organize(store, force=False, http=http)
-            print(
-                f"📚 Memory organizer: {report['deduplicated']} deduped, "
-                f"{report['re_categorized']} re-categorized, "
-                f"{report['consolidated']} consolidated, "
-                f"kb={'yes' if report['knowledge_base_written'] else 'no'}, "
-                f"http={'up' if report['http_available'] else 'down'}"
-            )
-        except Exception as exc:
-            print(f"⚠️ Memory organizer run failed: {type(exc).__name__}: {exc}")
-
-    threading.Thread(target=run, name="memory-organizer", daemon=True).start()
-
-
-_ORGANIZER_STARTED = False
-_ORGANIZER_LOCK = threading.Lock()
 
 
 def _knowledge_file_sort_key(filename: str):
@@ -1072,50 +830,15 @@ def queue_learning_topic(topic: str):
 
 def get_growth_snapshot() -> dict:
     profile = _load_json_file(GROWTH_PROFILE_FILE, _default_growth_profile())
-    buffer_items, _dropped = load_learning_buffer(Path(ONLINE_LEARNING_BUFFER_FILE))
-    pending_learning = len(buffer_items)
-    with _FTP_PENDING_LOCK:
-        pending_ftp = len(_FTP_PENDING_ENTRIES)
-    snapshot = {
+    buffer_data = _load_json_file(ONLINE_LEARNING_BUFFER_FILE, {"items": []})
+    pending_learning = len(buffer_data.get("items", [])) if isinstance(buffer_data, dict) else 0
+    pending_ftp = len(_FTP_PENDING_ENTRIES)
+    return {
         "growth_profile": profile,
         "pending_online_learning_items": pending_learning,
         "pending_ftp_uploads": pending_ftp,
         "ftp_batch_size": FTP_UPLOAD_BATCH_SIZE,
         "knowledge_override_count": len(_BASE_KNOWLEDGE_OVERRIDES),
-        "upload_queue": _upload_snapshot(),
-        "memory": _memory_snapshot(),
-    }
-    return snapshot
-
-
-def _upload_snapshot() -> dict:
-    """Report the upload worker so a stalled queue is visible, not guesswork."""
-    with _UPLOAD_STATS_LOCK:
-        stats = dict(_UPLOAD_STATS)
-    with _FTP_PENDING_LOCK:
-        pending = len(_FTP_PENDING_ENTRIES)
-    upload_queue = _UPLOAD_QUEUE
-    return {
-        **stats,
-        "pending_entries": pending,
-        "batches_queued": upload_queue.qsize() if upload_queue is not None else 0,
-    }
-
-
-def _memory_snapshot() -> dict:
-    """Report local cache, archive index, and mesh sizes without any FTP call."""
-    try:
-        store = _get_mcf_memory_store()
-    except Exception as exc:
-        return {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
-    with store._lock:
-        archive_notes = len(store._remote_index) if store._remote_index else 0
-        archive_loaded = store._remote_index is not None
-    return {
-        "local_notes": len(store.records),
-        "archive_notes": archive_notes,
-        "archive_index_loaded": archive_loaded,
-        "mesh": store.mesh_stats(),
     }
 
 
@@ -1246,21 +969,8 @@ def set_ftp_config(host=None, user=None, password=None, base_dir=None, batch_siz
 
 
 def flush_sync_tasks():
-    """Flush buffered work and pull the archive index/mesh into RAM."""
     _flush_pending_ftp_uploads(force=True)
     _flush_online_learning(force=True)
-    if _ftp_model_credentials_configured():
-        try:
-            store = _get_mcf_memory_store()
-            store.warm()
-        except Exception as exc:
-            print(f"⚠️ Archive index refresh failed: {type(exc).__name__}: {str(exc)[:160]}")
-    # Consolidation is cheap, bounded work: refresh the understanding layer so
-    # it never goes stale against a changing archive.
-    try:
-        _get_mcf_memory_store().consolidate(limit=3)
-    except Exception as exc:
-        print(f"⚠️ Consolidation skipped: {type(exc).__name__}: {str(exc)[:160]}")
 
 
 def _match_basic_interaction(normalized_text: str) -> str:
@@ -1801,9 +1511,10 @@ if not os.path.exists(HISTORY_FILE):
     with open(HISTORY_FILE, "w") as f:
         json.dump([], f)
 
-# Ensure learning queue exists (created through the schema so it is valid JSON)
+# Ensure learning queue exists
 if not os.path.exists(LEARNING_QUEUE_FILE):
-    save_topics(Path(LEARNING_QUEUE_FILE), [])
+    with open(LEARNING_QUEUE_FILE, "w") as f:
+        json.dump([], f)
 
 # Ensure learned topics tracker exists
 if not os.path.exists(LEARNED_TOPICS_FILE):
@@ -1834,12 +1545,15 @@ def search_memory(query):
 def add_to_learning_queue(topic: str):
     """Add a topic to the learning queue for autonomous exploration."""
     try:
-        # load_topics validates entries and de-duplicates case-insensitively.
-        queue, _dropped = load_topics(Path(LEARNING_QUEUE_FILE))
-        topic_lower = str(topic).lower().strip()
-        if topic_lower and topic_lower not in [t.lower() for t in queue]:
+        with open(LEARNING_QUEUE_FILE, "r") as f:
+            queue = json.load(f)
+        
+        # Avoid duplicates
+        topic_lower = topic.lower().strip()
+        if topic_lower not in [t.lower() for t in queue]:
             queue.append(topic)
-            save_topics(Path(LEARNING_QUEUE_FILE), queue[-100:])  # Keep last 100
+            with open(LEARNING_QUEUE_FILE, "w") as f:
+                json.dump(queue[-100:], f, indent=2)  # Keep last 100
             print(f"📝 Queued for learning: {topic}")
     except Exception as e:
         print(f"⚠️ Failed to queue topic: {str(e)}")
@@ -1847,9 +1561,8 @@ def add_to_learning_queue(topic: str):
 def process_learning_queue(max_topics: int = 3):
     """Autonomously research topics from the learning queue."""
     try:
-        queue, dropped = load_topics(Path(LEARNING_QUEUE_FILE))
-        if dropped:
-            print(f"⚠️ Dropped {dropped} malformed learning topic(s) from {LEARNING_QUEUE_FILE}")
+        with open(LEARNING_QUEUE_FILE, "r") as f:
+            queue = json.load(f)
         
         with open(LEARNED_TOPICS_FILE, "r") as f:
             learned_data = json.load(f)
@@ -1920,7 +1633,8 @@ def process_learning_queue(max_topics: int = 3):
             time.sleep(2)  # Respectful delay
         
         # Update queue and learned topics
-        save_topics(Path(LEARNING_QUEUE_FILE), queue[processed:])
+        with open(LEARNING_QUEUE_FILE, "w") as f:
+            json.dump(queue[processed:], f, indent=2)
         
         learned_data["last_learning_session"] = datetime.now().isoformat()
         with open(LEARNED_TOPICS_FILE, "w") as f:
@@ -2101,36 +1815,6 @@ def _search_wikipedia(query: str, max_items: int = 3) -> list:
         print(f"⚠️ Wikipedia search failed: {str(e)}")
         return []
 
-
-def _fetch_wikipedia_article(title: str) -> str | None:
-    """Fetch the full plain-text extract of a Wikipedia article (free, no API key)."""
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        url = "https://en.wikipedia.org/w/api.php"
-        params = {
-            "action": "query",
-            "format": "json",
-            "prop": "extracts",
-            "explaintext": 1,
-            "exsectionformat": "plain",
-            "titles": title,
-            "exlimit": 1,
-        }
-        res = requests.get(url, params=params, headers=headers, timeout=10)
-        if res.status_code != 200:
-            return None
-        data = res.json()
-        pages = data.get("query", {}).get("pages", {})
-        for page in pages.values():
-            extract = page.get("extract", "")
-            if extract:
-                return extract[:6000]
-        return None
-    except Exception as e:
-        print(f"⚠️ Wikipedia article fetch failed for {title!r}: {str(e)}")
-        return None
-
-
 def _search_bing(query: str, max_items: int = 5) -> list:
     """Search Bing for additional cross-verification results."""
     try:
@@ -2297,82 +1981,17 @@ def search_web(query):
     verified = search_web_verified(query)
     return verified.get("text")
 
-def _upload_worker() -> None:
-    """Upload batches handed over by the chat path, one FTP session per batch."""
-    while True:
-        batch = _UPLOAD_QUEUE.get()
-        try:
-            ok = save_to_geocities(batch)
-            with _UPLOAD_STATS_LOCK:
-                if ok:
-                    _UPLOAD_STATS["batches_uploaded"] += 1
-                    _UPLOAD_STATS["entries_uploaded"] += len(batch)
-                    _UPLOAD_STATS["last_success"] = datetime.now().isoformat()
-                else:
-                    _UPLOAD_STATS["batches_failed"] += 1
-                    _UPLOAD_STATS["last_error"] = "archive upload failed"
-            if not ok:
-                # Keep the batch so a transient FTP outage does not lose it.
-                _requeue_failed_batch(batch)
-        except Exception as exc:
-            with _UPLOAD_STATS_LOCK:
-                _UPLOAD_STATS["batches_failed"] += 1
-                _UPLOAD_STATS["last_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
-            _requeue_failed_batch(batch)
-        finally:
-            _UPLOAD_QUEUE.task_done()
-
-
-def _requeue_failed_batch(batch: list) -> None:
-    """Return a failed batch to the pending buffer, dropping the oldest if full."""
-    with _FTP_PENDING_LOCK:
-        _FTP_PENDING_ENTRIES[:0] = batch
-        overflow = len(_FTP_PENDING_ENTRIES) - FTP_UPLOAD_BACKLOG_MAX_ENTRIES
-        if overflow > 0:
-            del _FTP_PENDING_ENTRIES[:overflow]
-            print(
-                f"⚠️ FTP upload backlog exceeded {FTP_UPLOAD_BACKLOG_MAX_ENTRIES} entries; "
-                f"dropped the oldest {overflow}."
-            )
-
-
-def _get_upload_queue() -> queue_mod.Queue:
-    """Create the upload queue and start its worker exactly once."""
-    global _UPLOAD_QUEUE
-    if _UPLOAD_QUEUE is not None:
-        return _UPLOAD_QUEUE
-    with _UPLOAD_QUEUE_LOCK:
-        if _UPLOAD_QUEUE is None:
-            _UPLOAD_QUEUE = queue_mod.Queue(maxsize=max(1, FTP_UPLOAD_QUEUE_MAX_BATCHES))
-            threading.Thread(target=_upload_worker, name="peakebot-ftp-upload", daemon=True).start()
-        return _UPLOAD_QUEUE
-
-
 def _flush_pending_ftp_uploads(force: bool = False):
-    """Hand buffered entries to the upload worker without blocking the caller."""
-    if not _ftp_model_credentials_configured():
-        with _FTP_PENDING_LOCK:
-            dropped = len(_FTP_PENDING_ENTRIES)
-            _FTP_PENDING_ENTRIES.clear()
-        if dropped:
-            # Nothing can be uploaded, so say so once instead of growing forever.
-            print(f"⚠️ FTP is not configured; discarded {dropped} buffered memory entr(y/ies).")
+    global _FTP_PENDING_ENTRIES
+    if not _FTP_PENDING_ENTRIES:
         return
-    with _FTP_PENDING_LOCK:
-        if not _FTP_PENDING_ENTRIES:
-            return
-        if not force and len(_FTP_PENDING_ENTRIES) < max(1, FTP_UPLOAD_BATCH_SIZE):
-            return
-        batch = list(_FTP_PENDING_ENTRIES)
-        _FTP_PENDING_ENTRIES.clear()
+    if not force and len(_FTP_PENDING_ENTRIES) < max(1, FTP_UPLOAD_BATCH_SIZE):
+        return
 
-    upload_queue = _get_upload_queue()
-    try:
-        upload_queue.put_nowait(batch)
-    except queue_mod.Full:
-        # Worker is behind or FTP is down: keep the entries for the next flush.
-        _requeue_failed_batch(batch)
-        print("⚠️ FTP upload queue is full; holding entries for the next flush.")
+    # Upload queued entries in one FTP session to reduce connection overhead.
+    queued = list(_FTP_PENDING_ENTRIES)
+    save_to_geocities(queued)
+    _FTP_PENDING_ENTRIES = []
 
 
 def _session_log_write_path() -> str:
@@ -2384,6 +2003,7 @@ def _session_log_write_path() -> str:
 
 
 def remember(prompt, response):
+    global _FTP_PENDING_ENTRIES
     if _SENSITIVE_MEMORY_RE.search(f"{prompt} {response}"):
         print("🔒 Skipping conversation persistence because it may contain credential material.")
         return
@@ -2403,8 +2023,7 @@ def remember(prompt, response):
     # Online growth loop: collect quality interactions and periodically retrain/checkpoint.
     _queue_online_learning(prompt, response, source="conversation")
 
-    with _FTP_PENDING_LOCK:
-        _FTP_PENDING_ENTRIES.append(entry)
+    _FTP_PENDING_ENTRIES.append(entry)
     _flush_pending_ftp_uploads(force=False)
 
 
@@ -2442,53 +2061,15 @@ def _sync_mcf_ftp_config(store):
 
 
 def _retrieve_mcf_memory(query: str) -> str:
-    """Recall relevant memory, preferring the archive index and walking the mesh.
-
-    Order matters for both speed and completeness: the local cache answers
-    without any network call, the archive index is a single bounded download,
-    and the mesh traversal then adds connected notes the plain keyword search
-    would have missed.
-    """
+    """Retrieve task-relevant MCF3 notes from FTP, with bounded local fallback."""
     try:
         store = _get_mcf_memory_store()
-        local = store.relevant(query, limit=6, max_chars=1400)
-        archive = ""
         if store.ftp_configured:
-            archive = store.relevant_remote(query, limit=6, max_chars=1400)
-        mesh = store.mesh_recall(query, limit=6, max_chars=1400)
-        combined: list[str] = []
-        seen_notes: set[str] = set()
-        for block in (local, archive, mesh):
-            for line in block.splitlines():
-                body = line.split("] ", 1)[-1].strip() if "] " in line else line.strip()
-                if not body or body.casefold() in seen_notes:
-                    continue
-                seen_notes.add(body.casefold())
-                combined.append(line)
-        return "\n".join(combined)
+            return store.relevant_remote(query, limit=6, max_chars=1400)
+        return store.relevant(query, limit=6, max_chars=1400)
     except Exception as exc:
         print(f"⚠️ MCF3 memory recall unavailable: {exc}")
         return ""
-
-
-def warm_memory_index() -> None:
-    """Warm the archive index once per process so the first recall is fast.
-
-    Called from the startup sync, never from a chat request: a download that
-    fails here costs nothing, and a chat turn then only ever searches memory
-    that is already in RAM.
-    """
-    global _MEMORY_SYNC_STARTED
-    with _MEMORY_SYNC_LOCK:
-        if _MEMORY_SYNC_STARTED:
-            return
-        _MEMORY_SYNC_STARTED = True
-    try:
-        store = _get_mcf_memory_store()
-        if store.ftp_configured:
-            store.warm()
-    except Exception as exc:
-        print(f"⚠️ Memory index warm-up skipped: {type(exc).__name__}: {str(exc)[:160]}")
 
 
 _EXPLICIT_MEMORY_RE = re.compile(
@@ -2498,37 +2079,6 @@ _EXPLICIT_MEMORY_RE = re.compile(
 _HELP_REQUEST_RE = re.compile(
     r"^(?:/?help|/?commands?|what\s+(?:are\s+)?(?:(?:the|your)\s+)?(?:commands?|things\s+you\s+can\s+do)|"
     r"how\s+do\s+i\s+use\s+you)[.!?\s]*$",
-    re.IGNORECASE,
-)
-_WEATHER_REQUEST_RE = re.compile(
-    r"^(?:please\s+)?(?:what(?:'s|\s+is|s)?\s+(?:the\s+)?weather\s+(?:like\s+)?(?:in|at|for)|weather\s+(?:like\s+)?(?:in|at|for)|"
-    r"temperature\s+(?:like\s+)?(?:in|at|for)|forecast\s+(?:like\s+)?(?:in|at|for))\s+(.+?)[.!?\s]*$",
-    re.IGNORECASE,
-)
-_WEATHER_FOLLOWUP_RE = re.compile(
-    r"^(?:what about|how about|and|also|in)\s+(.+?)[.!?\s]*$",
-    re.IGNORECASE,
-)
-_CODE_GENERATION_RE = re.compile(
-    r"^(?:please\s+)?(?:write|create|generate|make|build|code)\s+(?:(?:a|an|some)?\s*)?(?:python|javascript|js|bash|shell|sh|html|css|sql|go|rust|java|c\+\+|cpp|ruby|php|typescript|ts)\s+(?:(?:script|program|code|app|application|module|function|class|tool|utility|bot))?\s*(?:(?:for|to|that|which|with|about))\s*(.+?)[.!?\s]*$",
-    re.IGNORECASE,
-)
-_CODE_GENERATION_SHORT_RE = re.compile(
-    r"^(?:please\s+)?(?:write|create|generate|make|build|code)\s+(.+?)[.!?\s]*$",
-    re.IGNORECASE,
-)
-_CLOCK_REQUEST_RE = re.compile(
-    r"^(?:please\s+)?(?:what(?:'s| is)\s+(?:the\s+)?(?:current\s+)?time\s+(?:in|at|for)|"
-    r"time\s+(?:in|at|for)|clock\s+(?:in|at|for))\s+(.+?)[.!?\s]*$",
-    re.IGNORECASE,
-)
-_CALENDAR_REQUEST_RE = re.compile(
-    r"^(?:please\s+)?(?:what(?:'s| is)\s+on\s+(?:my\s+)?calendar|calendar\s+(?:events|schedule|appointments)|"
-    r"(?:my\s+)?calendar\s+(?:today|this week|tomorrow)|upcoming\s+events|schedule\s+(?:for|today))\s*(.+)?[.!?\s]*$",
-    re.IGNORECASE,
-)
-_CALENDAR_ADD_RE = re.compile(
-    r"^(?:please\s+)?(?:add|create|schedule)\s+(?:an?\s+)?(?:event|appointment|meeting)\s+(?:called\s+)?(.+?)\s+(?:on|at|for)\s+(.+?)[.!?\s]*$",
     re.IGNORECASE,
 )
 _LEARN_WEBSITE_RE = re.compile(
@@ -2549,11 +2099,7 @@ _HELP_RESPONSE = """Here are the commands I understand in this chat:
 • recall math: <topic> — search saved math notes, including the shared archive when FTP is available.
 • remember that <note> — save a useful general memory (not passwords, keys, or tokens).
 • search web: <question> — research a question on the web.
-• weather in <city> — current weather for a city (free wttr.in API).
-• time in <city/timezone> — current local time for a city or time zone.
-• calendar events — list upcoming calendar events (Google Calendar if configured).
-• add event <name> on <datetime> — add a calendar event (Google Calendar if configured).
-• selftalk <topic> — run an internal self-talk learning session and store results.
+• help or commands — show this list.
 
 For a longer math note, try: learn math: The area of a circle is pi times the radius squared; circumference is 2 times pi times the radius. These are stored as unverified notes unless I can check them as basic arithmetic.
 
@@ -2631,308 +2177,6 @@ def _handle_math_request(prompt: str) -> str | None:
     return None
 
 
-def _handle_weather_request(prompt: str) -> str | None:
-    """Fetch current weather for a city using the free wttr.in API (no key required)."""
-    match = _WEATHER_REQUEST_RE.fullmatch(prompt.strip())
-    if not match:
-        return None
-    city = match.group(1).strip()
-    if not city:
-        return None
-    try:
-        url = f"https://wttr.in/{quote_plus(city)}?format=3"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200 and resp.text.strip():
-            result = resp.text.strip()
-            # format=3 returns: "City: ☁️ +12°C"
-            return f"{result}"
-        return f"Couldn't fetch weather for {city}. Try a different city name."
-    except Exception as exc:
-        return f"Weather lookup failed for {city}: {type(exc).__name__}"
-
-
-def _is_short_location_input(text: str) -> bool:
-    """Check if input looks like a standalone zip code, city name, or state."""
-    stripped = text.strip()
-    if not stripped:
-        return False
-    # 5-digit zip code (optionally +4)
-    if re.match(r"^\d{5}(?:-\d{4})?$", stripped):
-        return True
-    # State abbreviation
-    if re.match(r"^[A-Z]{2}$", stripped.upper()):
-        return True
-    # City name: 1-3 words, no digits, reasonable length
-    words = stripped.split()
-    if 1 <= len(words) <= 3 and len(stripped) <= 40 and not any(c.isdigit() for c in stripped):
-        return True
-    return False
-
-
-def _last_assistant_was_weather(history: list) -> bool:
-    """Return True if the most recent assistant message was a weather report."""
-    for item in reversed(history or []):
-        if item.get("role") == "assistant":
-            content = item.get("content", "")
-            return any(marker in content for marker in ["°F", "°C", "weather", "wttr"])
-    return False
-
-
-def _handle_weather_followup_request(prompt: str, history: list) -> str | None:
-    """Handle short location follow-ups like 'What about 21040?' or bare '21040'
-    after a weather conversation."""
-    stripped = prompt.strip()
-    if not _is_short_location_input(stripped):
-        return None
-    if not _last_assistant_was_weather(history):
-        return None
-    match = _WEATHER_FOLLOWUP_RE.match(stripped)
-    location = match.group(1).strip() if match else stripped
-    if not location:
-        return None
-    fake_prompt = f"weather in {location}"
-    return _handle_weather_request(fake_prompt)
-
-
-_CODE_LANGUAGE_MAP = {
-    "python": "py", "py": "py",
-    "javascript": "js", "js": "js",
-    "bash": "sh", "shell": "sh", "sh": "sh",
-    "html": "html", "css": "css",
-    "sql": "sql", "go": "go", "rust": "rs",
-    "java": "java", "cpp": "cpp", "c++": "cpp",
-    "ruby": "rb", "php": "php",
-    "typescript": "ts", "ts": "ts",
-}
-
-
-def _extract_code_blocks(text: str) -> list[tuple[str, str]]:
-    """Extract fenced code blocks from AI output. Returns list of (language, code)."""
-    blocks: list[tuple[str, str]] = []
-    pattern = re.compile(r"```(\w+)?\n(.*?)\n```", re.DOTALL)
-    for match in pattern.finditer(text):
-        lang = (match.group(1) or "text").strip().lower()
-        code = match.group(2).strip()
-        if code:
-            blocks.append((lang, code))
-    return blocks
-
-
-def _upload_code_to_ftp(filename: str, code: str) -> str | None:
-    """Upload generated code to FTP and return the remote path, or None on failure."""
-    if not _ftp_model_credentials_configured():
-        return None
-    try:
-        ftp = _ftp_connect_for_upload()
-        try:
-            base_dir = _resolved_ftp_base_dir().strip("/")
-            remote_name = f"{base_dir}/{filename}" if base_dir else filename
-            data = code.encode("utf-8")
-            import io as _io
-            _ftp_store_binary(ftp, remote_name, _io.BytesIO(data))
-            return remote_name
-        finally:
-            try:
-                ftp.quit()
-            except Exception:
-                pass
-    except Exception as exc:
-        print(f"⚠️ Code upload to FTP failed: {type(exc).__name__}: {exc}")
-        return None
-
-
-def _handle_code_generation_request(prompt: str) -> str | None:
-    """Generate code via AI provider, upload to FTP, return download info."""
-    stripped = prompt.strip()
-    match = _CODE_GENERATION_RE.fullmatch(stripped)
-    if not match:
-        match = _CODE_GENERATION_SHORT_RE.fullmatch(stripped)
-        if not match:
-            return None
-        description = match.group(1).strip()
-    else:
-        description = match.group(1).strip()
-
-    if not description or len(description) < 3:
-        return None
-
-    # Detect language from description or default to python
-    lang = "python"
-    for key, ext in _CODE_LANGUAGE_MAP.items():
-        if key in description.lower():
-            lang = key
-            break
-
-    system = (
-        "You are Harold, an expert programmer. Write clean, working, well-commented "
-        "code in a single fenced code block with the language tag. Do not add "
-        "explanatory prose outside the code block. Only output the code block."
-    )
-    user = f"Write {lang} code for: {description}"
-
-    result = _ai_chat_completion(user, "")
-    answer = result.get("answer")
-    if not answer:
-        return None
-
-    blocks = _extract_code_blocks(answer)
-    if not blocks:
-        # Fallback: treat the whole answer as code if it looks like code
-        if any(c in answer for c in ["def ", "function ", "print(", "console.log", "import ", "class "]):
-            blocks = [(lang, answer.strip())]
-        else:
-            return None
-
-    code_lang, code = blocks[0]
-    ext = _CODE_LANGUAGE_MAP.get(code_lang, "txt")
-    safe_name = re.sub(r"[^a-zA-Z0-9_\-]+", "_", description.strip()).strip("_")[:40]
-    if not safe_name:
-        safe_name = "generated_code"
-    filename = f"{safe_name}.{ext}"
-
-    remote_path = _upload_code_to_ftp(filename, code)
-    if not remote_path:
-        return f"Generated code but could not upload to FTP. FTP may not be configured.\n\n```{code_lang}\n{code}\n```"
-
-    provider = result.get("provider") or "unknown"
-    return (
-        f"Generated `{filename}` ({code_lang}) and saved to FTP at `{remote_path}`.\n"
-        f"Download it from the web app under Code → Downloads.\n\n"
-        f"(Answered via {provider}.)"
-    )
-
-
-
-def _handle_clock_request(prompt: str) -> str | None:
-    """Report current time for a city/timezone using zoneinfo, with worldtimeapi.org fallback."""
-    match = _CLOCK_REQUEST_RE.fullmatch(prompt.strip())
-    if not match:
-        return None
-    tz_name = match.group(1).strip()
-    if not tz_name:
-        return None
-    tz_name = tz_name.lower().strip(".,!?")
-    # Map common city names to IANA timezones
-    city_tz_map = {
-        "new york": "America/New_York", "nyc": "America/New_York",
-        "london": "Europe/London", "uk": "Europe/London",
-        "tokyo": "Asia/Tokyo", "japan": "Asia/Tokyo",
-        "sydney": "Australia/Sydney", "australia": "Australia/Sydney",
-        "berlin": "Europe/Berlin", "germany": "Europe/Berlin",
-        "paris": "Europe/Paris", "france": "Europe/Paris",
-        "moscow": "Europe/Moscow", "russia": "Europe/Moscow",
-        "dubai": "Asia/Dubai", "uae": "Asia/Dubai",
-        "mumbai": "Asia/Kolkata", "india": "Asia/Kolkata",
-        "sao paulo": "America/Sao_Paulo", "brazil": "America/Sao_Paulo",
-        "los angeles": "America/Los_Angeles", "la": "America/Los_Angeles",
-        "chicago": "America/Chicago", "toronto": "America/Toronto",
-        "vancouver": "America/Vancouver", "montreal": "America/Montreal",
-        "seoul": "Asia/Seoul", "korea": "Asia/Seoul",
-        "singapore": "Asia/Singapore", "hong kong": "Asia/Hong_Kong",
-        "shanghai": "Asia/Shanghai", "china": "Asia/Shanghai",
-        "dubai": "Asia/Dubai",
-    }
-    tz_key = tz_name
-    if tz_key in city_tz_map:
-        tz_key = city_tz_map[tz_key]
-    try:
-        tz = ZoneInfo(tz_key)
-        now = datetime.now(tz)
-        return f"The current time in {tz_name} is {now.strftime('%I:%M %p %Z')} on {now.strftime('%A, %B %d, %Y')}."
-    except Exception:
-        pass
-    # Fallback: try worldtimeapi.org
-    try:
-        api_tz = tz_key.replace(" ", "_").title()
-        url = f"http://worldtimeapi.org/api/timezone/{api_tz}"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            dt = data.get("datetime", "")
-            if dt:
-                from datetime import datetime as _dt
-                parsed = _dt.fromisoformat(dt)
-                return f"The current time in {tz_name} is {parsed.strftime('%I:%M %p')} on {parsed.strftime('%A, %B %d, %Y')}."
-        return f"Couldn't determine the time zone for {tz_name}. Try a city name like London, Tokyo, or New York."
-    except Exception as exc:
-        return f"Clock lookup failed for {tz_name}: {type(exc).__name__}"
-
-
-_calendar_manager = None
-
-
-def _get_calendar_manager():
-    global _calendar_manager
-    if _calendar_manager is None:
-        _calendar_manager = IntegrationManager()
-    return _calendar_manager
-
-
-def _handle_calendar_request(prompt: str) -> str | None:
-    """Read upcoming calendar events via Google Calendar (if configured) or memory store."""
-    match = _CALENDAR_REQUEST_RE.fullmatch(prompt.strip())
-    if not match:
-        return None
-    try:
-        mgr = _get_calendar_manager()
-        if mgr.google_calendar:
-            now = datetime.utcnow()
-            end = now + timedelta(days=7)
-            events = mgr.google_calendar.get_events(
-                time_min=now, time_max=end, max_results=5
-            )
-            if not events:
-                return "No upcoming calendar events in the next 7 days."
-            lines = ["Upcoming calendar events:"]
-            for ev in events:
-                start = ev.get("start", {}).get("dateTime", ev.get("start", {}).get("date", ""))
-                summary = ev.get("summary", "(no title)")
-                if start:
-                    try:
-                        dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                        lines.append(f"• {dt.strftime('%b %d, %I:%M %p')} — {summary}")
-                    except Exception:
-                        lines.append(f"• {start} — {summary}")
-                else:
-                    lines.append(f"• {summary}")
-            return "\n".join(lines)
-        # Fallback: check memory for saved calendar events
-        store = _get_mcf_memory_store()
-        hits = store.relevant("calendar events appointments schedule", limit=5)
-        if hits:
-            lines = ["Saved calendar events:"]
-            for h in hits[:5]:
-                lines.append(f"• {h.get('note', h.get('content', str(h)))[:120]}")
-            return "\n".join(lines)
-        return "No calendar events found. Google Calendar is not configured; save events with 'remember that ...'."
-    except Exception as exc:
-        return f"Calendar lookup failed: {type(exc).__name__}"
-
-
-def _handle_calendar_add_request(prompt: str) -> str | None:
-    """Add a calendar event via Google Calendar (if configured)."""
-    match = _CALENDAR_ADD_RE.fullmatch(prompt.strip())
-    if not match:
-        return None
-    summary = match.group(1).strip()
-    when = match.group(2).strip()
-    try:
-        mgr = _get_calendar_manager()
-        if not mgr.google_calendar:
-            return "Google Calendar is not configured (credentials.json required). I can't add events without it."
-        start_dt = datetime.fromisoformat(when)
-        if start_dt.tzinfo is None:
-            from zoneinfo import ZoneInfo as _ZI
-            start_dt = start_dt.replace(tzinfo=_ZI("UTC"))
-        end_dt = start_dt + timedelta(hours=1)
-        event = mgr.google_calendar.create_event(
-            summary=summary, start_time=start_dt, end_time=end_dt
-        )
-        return f"Calendar event created: {event.get('summary', summary)} on {start_dt.strftime('%b %d, %I:%M %p')}."
-    except Exception as exc:
-        return f"Failed to add calendar event: {type(exc).__name__}"
-
-
 def _handle_help_request(prompt: str) -> str | None:
     """Return the supported command list for the Render web chat."""
     if _HELP_REQUEST_RE.fullmatch(prompt.strip()):
@@ -2955,287 +2199,6 @@ def _handle_website_learning_request(prompt: str) -> str | None:
         return None
     url = match.group(1).rstrip(".,;!")
     return _learn_from_website_url(url)
-
-
-def _handle_dictionary_request(prompt: str) -> str | None:
-    """Handle explicit dictionary/learn-word requests from the free Dictionary API."""
-    text = prompt.strip()
-    pl = text.lower()
-
-    define_match = re.match(r"^(?:define|what is the meaning of|meaning of)\s+(.+?)\s*[.!]?$", pl, re.IGNORECASE)
-    if define_match:
-        word = define_match.group(1).strip().strip('"\'')
-        if len(word) < 2 or len(word) > 40:
-            return "Give me a single word between 2 and 40 characters to define."
-        model = _get_language_model()
-        definition = model.get_word_meaning(word)
-        if definition:
-            synonyms = model.word_synonyms.get(word, [])
-            syn_text = f" Synonyms: {', '.join(synonyms[:8])}" if synonyms else ""
-            return f"The word '{word}' means: {definition}{syn_text}"
-        return f"I couldn't find a definition for '{word}' in the free dictionary. Try another word."
-
-    learn_match = re.match(r"^(?:learn|teach|learn word|add word)\s+(?:the\s+)?word\s+(.+?)\s*[.!]?$", pl, re.IGNORECASE)
-    if not learn_match:
-        learn_match = re.match(r"^learn word\s+(.+?)\s*[.!]?$", pl, re.IGNORECASE)
-    if learn_match:
-        word = learn_match.group(1).strip().strip('"\'')
-        if len(word) < 2 or len(word) > 40:
-            return "Give me a single word between 2 and 40 characters to learn."
-        model = _get_language_model()
-        result = model.learn_word(word)
-        if result["added"] > 0:
-            syn_text = f" ({result['synonyms'][:6]})" if result["synonyms"] else ""
-            return f"I learned '{word}' and added {result['added']} new token(s){syn_text} to my vocabulary."
-        if result["meanings"]:
-            return f"'{word}' is already in my vocabulary: {result['meanings'][0]}"
-        return f"I couldn't add '{word}' — the free dictionary didn't return anything for it."
-
-    return None
-
-
-def _handle_wikipedia_request(prompt: str) -> str | None:
-    """Handle 'learn wikipedia <topic>' requests using the free Wikipedia API.
-
-    Fetches the full article extract (not just a snippet), saves it to MCF3
-    memory so the bot can recall it later, and teaches the model key words.
-    """
-    text = prompt.strip()
-    pl = text.lower()
-
-    wiki_match = re.match(r"^(?:learn\s+wikipedia|wikipedia)\s+(.+?)\s*[.!]?$", pl, re.IGNORECASE)
-    if not wiki_match:
-        return None
-
-    topic = wiki_match.group(1).strip().strip('"\'')
-    if len(topic) < 2 or len(topic) > 80:
-        return "Give me a Wikipedia topic between 2 and 80 characters to learn about."
-
-    try:
-        search_results = _search_wikipedia(topic, max_items=1)
-        if not search_results:
-            return f"I couldn't find a Wikipedia article about '{topic}'. Try a different topic."
-
-        title = search_results[0].get("title", "")
-        if not title:
-            return f"I couldn't find a Wikipedia article about '{topic}'. Try a different topic."
-
-        article = _fetch_wikipedia_article(title)
-        if not article:
-            return f"I found '{title}' on Wikipedia but couldn't fetch the full article right now."
-
-        # Save the full article to shared MCF3 memory for later recall.
-        store = _get_mcf_memory_store()
-        record = store.add(article, category="Knowledge/Wikipedia", source=f"wikipedia:{title}")
-        if record is None:
-            return f"I already have the Wikipedia article '{title}' in my memory."
-
-        if store.ftp_configured:
-            try:
-                store.upload(record)
-                storage = "and uploaded it to the shared FTP memory store."
-            except Exception as exc:
-                print(f"⚠️ Wikipedia FTP upload failed: {exc}")
-                storage = "but the shared FTP upload failed (saved locally)."
-        else:
-            storage = "(saved locally; shared FTP is not connected)"
-
-        # Teach the model the topic's key words from the free dictionary API.
-        model = _get_language_model()
-        words = [w.strip(".,!?:;\"'()[]{}") for w in re.findall(r"[a-zA-Z]{4,}", article.lower())]
-        taught = 0
-        seen = set()
-        for w in words:
-            if w in seen or len(w) < 4:
-                continue
-            seen.add(w)
-            try:
-                result = model.learn_word(w)
-                if result["added"] > 0:
-                    taught += 1
-                    if taught >= 10:
-                        break
-            except Exception:
-                pass
-
-        snippet = article[:220].replace("\n", " ")
-        return (
-            f"I learned about '{title}' from Wikipedia and saved the full article {storage} "
-            f"Also taught my model {taught} new word(s) from the article. "
-            f"Preview: {snippet}…"
-        )
-    except Exception as exc:
-        print(f"⚠️ Wikipedia learning failed: {exc}")
-        return f"I couldn't learn about '{topic}' from Wikipedia right now. Try again later."
-
-
-def _fetch_gutenberg_book(book_id: str) -> tuple[str, str] | None:
-    """Fetch a public-domain book's plain text from Project Gutenberg.
-
-    Returns (title, text) or None if not found. Strips Gutenberg's
-    header/footer license boilerplate.
-    """
-    try:
-        book_id = book_id.strip()
-        if not book_id.isdigit():
-            return None
-
-        urls = [
-            f"https://www.gutenberg.org/files/{book_id}/{book_id}-0.txt",
-            f"https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}.txt",
-        ]
-
-        text = None
-        for url in urls:
-            try:
-                headers = {"User-Agent": "Mozilla/5.0 (HaroldBot/1.0; educational)"}
-                res = requests.get(url, headers=headers, timeout=15)
-                if res.status_code == 200 and len(res.text) > 1000:
-                    text = res.text
-                    break
-            except Exception:
-                continue
-        if text is None:
-            return None
-
-        # Strip Gutenberg header/footer boilerplate.
-        start_markers = [
-            "*** START OF THE PROJECT GUTENBERG EBOOK",
-            "***START OF THE PROJECT GUTENBERG EBOOK",
-        ]
-        end_markers = [
-            "*** END OF THE PROJECT GUTENBERG EBOOK",
-            "***END OF THE PROJECT GUTENBERG EBOOK",
-        ]
-
-        start_idx = -1
-        for m in start_markers:
-            start_idx = text.find(m)
-            if start_idx >= 0:
-                break
-        if start_idx >= 0:
-            newline = text.find("\n", start_idx)
-            text = text[newline + 1:] if newline >= 0 else text[start_idx:]
-
-        end_idx = len(text)
-        for m in end_markers:
-            found = text.find(m)
-            if found >= 0:
-                end_idx = found
-                break
-        text = text[:end_idx].strip()
-
-        # Extract a title from the first meaningful lines.
-        title = f"Gutenberg book #{book_id}"
-        for line in text.splitlines()[:40]:
-            line = line.strip()
-            if len(line) > 3 and len(line) < 120:
-                title = line
-                break
-
-        return title, text
-    except Exception as exc:
-        print(f"⚠️ Gutenberg fetch failed for {book_id!r}: {exc}")
-        return None
-
-
-def _handle_gutenberg_request(prompt: str) -> str | None:
-    """Handle 'learn gutenberg <book-id>' requests from Project Gutenberg.
-
-    Downloads a public-domain book, saves it to MCF3 memory (and FTP when
-    configured), and teaches the model its vocabulary so Harold's language
-    understanding grows from real books.
-    """
-    text = prompt.strip()
-    pl = text.lower()
-
-    guten_match = re.match(r"^(?:learn\s+gutenberg|gutenberg)\s+(.+?)\s*[.!]?$", pl, re.IGNORECASE)
-    if not guten_match:
-        return None
-
-    book_id = guten_match.group(1).strip().strip('"\'')
-    if not book_id.isdigit():
-        return "Give me a Project Gutenberg book ID (a number). Example: 'learn gutenberg 1342'"
-
-    result = _fetch_gutenberg_book(book_id)
-    if result is None:
-        return f"I couldn't find or download Gutenberg book #{book_id}. Try a different book ID."
-
-    title, book_text = result
-    if len(book_text) < 500:
-        return f"Gutenberg book #{book_id} ('{title}') downloaded but had too little readable text."
-
-    # Respect bandwidth: cap the stored text to the first 200 KB.
-    stored_text = book_text[:200 * 1024]
-
-    try:
-        store = _get_mcf_memory_store()
-        record = store.add(stored_text, category="Knowledge/Gutenberg", source=f"gutenberg:{book_id}")
-        if record is None:
-            return f"I already have Gutenberg book #{book_id} ('{title}') in my memory."
-
-        if store.ftp_configured:
-            try:
-                store.upload(record)
-                storage = "and uploaded to the shared FTP memory store."
-            except Exception as exc:
-                print(f"⚠️ Gutenberg FTP upload failed: {exc}")
-                storage = "but the shared FTP upload failed (saved locally)."
-        else:
-            storage = "(saved locally; shared FTP is not connected)"
-
-        # Teach the model vocabulary from the book's real words (no per-word
-        # network calls — these are genuine English words from the text).
-        model = _get_language_model()
-        words = [w.strip(".,!?:;\"'()[]{}") for w in re.findall(r"[a-zA-Z]{4,}", book_text.lower())]
-        taught = 0
-        seen = set()
-        for w in words:
-            if w in seen or len(w) < 4:
-                continue
-            seen.add(w)
-            try:
-                result_word = model.learn_word(w)
-                if result_word["added"] > 0:
-                    taught += 1
-                    if taught >= 15:
-                        break
-            except Exception:
-                pass
-
-        word_count = len(book_text.split())
-        return (
-            f"I learned Gutenberg book #{book_id}: '{title}' ({word_count:,} words) {storage} "
-            f"Also taught my model {taught} new word(s) from the book."
-        )
-    except Exception as exc:
-        print(f"⚠️ Gutenberg learning failed: {exc}")
-        return f"I couldn't save Gutenberg book #{book_id} to memory right now."
-
-
-def _handle_organize_request(prompt: str) -> str | None:
-    """Handle 'organize memory' requests: deduplicate, re-categorize,
-    consolidate, and build an organized knowledge base on the FTP Harold dir."""
-    pl = prompt.strip().lower()
-    if not pl.startswith(("organize memory", "organise memory", "organize my memory", "reorganize memory")):
-        return None
-
-    store = _get_mcf_memory_store()
-    http = HttpRecallCoordinator()
-    try:
-        report = sync_and_organize(store, force=True, http=http)
-        kb_status = "written" if report["knowledge_base_written"] else "skipped"
-        http_status = "up" if report["http_available"] else "down"
-        cats = ", ".join(f"{c}:{b['knowledge']} notes" for c, b in sorted(report["categories"].items())[:5])
-        return (
-            f"Memory organized ({report['deduplicated']} deduped, "
-            f"{report['re_categorized']} re-categorized, "
-            f"{report['consolidated']} consolidated). "
-            f"Knowledge base {kb_status} to FTP ``{HAROLD_FTP_DIR}`` directory. "
-            f"HTTP cross-check {http_status}. Categories: {cats}."
-        )
-    except Exception as exc:
-        return f"Memory organization failed: {type(exc).__name__}: {exc}"
 
 
 def _learn_from_sources(topic: str, urls: list[str]) -> str:
@@ -3410,12 +2373,7 @@ def _recall_math_notes(query: str) -> str:
 
 
 def _save_explicit_mcf_memory(prompt: str) -> str | None:
-    """Save an explicit user memory request, refusing credentials and secrets.
-
-    Also trains the neural model synchronously (hot-learning layer) and queues
-    the note for background online learning (consolidation layer) so the
-    knowledge compounds across chats and deploys.
-    """
+    """Save an explicit user memory request, refusing credentials and secrets."""
     match = _EXPLICIT_MEMORY_RE.match(prompt.strip())
     if not match:
         return None
@@ -3432,31 +2390,64 @@ def _save_explicit_mcf_memory(prompt: str) -> str | None:
         if store.ftp_configured:
             try:
                 store.upload(record)
-                storage = "saved to shared MCF3/FTP memory"
+                return "Got it—I saved that in the shared MCF3 knowledge store."
             except Exception as exc:
                 print(f"⚠️ MCF3 FTP upload failed: {exc}")
-                storage = "saved locally (FTP upload failed)"
-        else:
-            storage = "saved locally (FTP not configured)"
-
-        # Hot-learning layer: synchronously adjust neural weights on the note.
-        try:
-            active_model = _get_language_model()
-            with _MODEL_TRAIN_LOCK:
-                active_model.learn_from_conversation(note, note, epochs=1)
-            # Long-term consolidation: queue for background online learning.
-            _queue_online_learning(note, note, source="note")
-        except Exception as exc:
-            print(f"⚠️ Neural training on note failed: {exc}")
-
-        return f"Got it—I saved that note {storage} and trained my model on it."
+                return "Got it—I saved that in this instance's bounded cache, but the shared FTP upload failed."
+        return "Got it—I saved that in this instance's bounded cache. The shared FTP store is not connected."
     except Exception as exc:
         print(f"⚠️ MCF3 memory save failed: {exc}")
         return "I couldn't save that note right now, but I can still use it in this conversation."
 
 
+def _ai_chat_g4f_go(
+    user_prompt: str,
+    system_prompt: str | None = None,
+    max_tokens: int = 120,
+) -> str | None:
+    """Use the optional OpenAI-compatible g4f-go endpoint."""
+    if not G4F_GO_BASE_URL:
+        return None
+
+    endpoint = G4F_GO_BASE_URL.rstrip("/")
+    if not endpoint.endswith("/v1/chat/completions"):
+        endpoint += "/v1/chat/completions"
+
+    headers = {"Content-Type": "application/json"}
+    if G4F_GO_API_KEY:
+        headers["Authorization"] = f"Bearer {G4F_GO_API_KEY}"
+
+    try:
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            json={
+                "model": G4F_GO_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": system_prompt or _CONVERSATION_SYSTEM_PROMPT,
+                    },
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.7,
+                "max_tokens": max_tokens,
+            },
+            timeout=15,
+        )
+        if not 200 <= response.status_code < 300:
+            print(f"⚠️ g4f-go returned HTTP {response.status_code}")
+            return None
+        data = response.json()
+        answer = data["choices"][0]["message"]["content"]
+        return answer.strip() if isinstance(answer, str) and answer.strip() else None
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+        print(f"⚠️ g4f-go failed: {type(exc).__name__}")
+        return None
+
+
 def _answer_from_research(prompt, hits, history, memory_context):
-    """Use the existing model to explain verified results conversationally."""
+    """Explain verified results with the local model, then g4f-go as fallback."""
     if not hits:
         return "I couldn't find useful sources for that yet. Could you narrow the question or tell me which part matters most?"
     user_prompt = build_research_prompt(prompt, hits, history, memory_context)
@@ -3468,6 +2459,13 @@ def _answer_from_research(prompt, hits, history, memory_context):
             return answer
     except Exception as exc:
         print(f"⚠️ Research answer synthesis failed: {exc}")
+    answer = _ai_chat_g4f_go(
+        user_prompt,
+        system_prompt=research_answer_system_prompt(),
+        max_tokens=160,
+    )
+    if answer and not _response_seems_low_confidence(answer):
+        return answer
     sources = []
     for hit in hits[:3]:
         title = str(hit.get("title", "Source")).strip()
@@ -3527,9 +2525,99 @@ _MAX_INTENT_EXAMPLES_PER_TYPE = 24
 _MIN_INTENT_MATCH_SCORE = 0.4
 
 
-# The learner itself lives in ``intent_learner.py`` (Semantic Router backed,
-# with the token-overlap scorer as its fallback). Kept importable from here so
-# ``peakebot.IntentLearner`` keeps resolving to a single implementation.
+class IntentLearner:
+    """Learns phrase-to-action mappings from conversation, applied linguistically.
+
+    Harold watches which user wordings lead to successful actions (math, memory,
+    search, and website reading) and stores those phrase→intent mappings in
+    MCF3 memory. Later, free-form input that semantically matches a learned phrase
+    triggers the same action without requiring an exact command.
+    """
+
+    def __init__(self, store) -> None:
+        self.store = store
+        self.intents: dict[str, list[str]] = {}
+        self._load_intents()
+
+    def _load_intents(self) -> None:
+        try:
+            query = f"cat:{_INTENT_CATEGORY} INTENT"
+            if getattr(self.store, "ftp_configured", False):
+                notes = self.store.relevant_remote(query, limit=100, max_chars=24000)
+            else:
+                notes = self.store.relevant(query, limit=100, max_chars=24000)
+        except Exception:
+            try:
+                notes = self.store.relevant(f"cat:{_INTENT_CATEGORY} INTENT", limit=100, max_chars=24000)
+            except Exception:
+                notes = ""
+        if not notes:
+            return
+        for line in notes.splitlines():
+            if not line.startswith("- ["):
+                continue
+            # Extract note text after "] "
+            payload = line.split("] ", 1)[-1] if "] " in line else line
+            marker = "INTENT:"
+            if marker not in payload:
+                continue
+            body = payload[payload.index(marker) + len(marker):].strip()
+            parts = [p.strip() for p in body.split("||")]
+            if len(parts) < 2:
+                continue
+            action_type = parts[0]
+            examples = [p for p in parts[1:] if p]
+            if action_type in _ALLOWED_INTENT_TYPES and examples:
+                known = self.intents.setdefault(action_type, [])
+                for example in examples:
+                    if example not in known and len(known) < _MAX_INTENT_EXAMPLES_PER_TYPE:
+                        known.append(example)
+
+    def learn_intent(self, phrase: str, action_type: str) -> None:
+        """Record that `phrase` reliably maps to `action_type`."""
+        phrase = phrase.strip()
+        if (action_type not in _ALLOWED_INTENT_TYPES or len(phrase) < 4 or len(phrase) > 200
+            or "||" in phrase
+                or _SENSITIVE_MEMORY_RE.search(phrase)):
+            return
+        examples = self.intents.setdefault(action_type, [])
+        if phrase in examples or len(examples) >= _MAX_INTENT_EXAMPLES_PER_TYPE:
+            return
+        examples.append(phrase)
+        try:
+            note = f"INTENT:{action_type} || {phrase}"
+            record = self.store.add(note, category=_INTENT_CATEGORY)
+            if record and getattr(self.store, "ftp_configured", False):
+                try:
+                    self.store.upload(record)
+                except Exception as exc:
+                    print(f"⚠️ Intent FTP upload failed: {type(exc).__name__}: {str(exc)[:160]}")
+        except Exception as exc:
+            print(f"⚠️ Intent persistence failed: {exc}")
+
+    def match_intent(self, phrase: str) -> tuple[str, float] | None:
+        """Return (intent_type, confidence) for the best matching learned intent."""
+        if not self.intents:
+            return None
+        query_tokens = _tokens(phrase)
+        if len(query_tokens) < 2:
+            return None
+        best_type: str | None = None
+        best_score = 0.0
+        for action_type, examples in self.intents.items():
+            for example in examples:
+                example_tokens = _tokens(example)
+                if not example_tokens:
+                    continue
+                overlap = len(query_tokens & example_tokens)
+                union = len(query_tokens | example_tokens)
+                score = overlap / union if union else 0.0
+                if overlap >= 2 and score > best_score:
+                    best_score = score
+                    best_type = action_type
+        if best_type is not None and best_score >= _MIN_INTENT_MATCH_SCORE:
+            return best_type, best_score
+        return None
 
 
 def _apply_intent_action(
@@ -3607,558 +2695,6 @@ def _search_web_verified_answer(query: str) -> str | None:
         return None
 
 
-_AI_PROVIDERS = [
-    ("g4f", "_ai_chat_g4f"),  # Try g4f first
-    ("openai", "_ai_chat_openai"),
-    ("openrouter", "_ai_chat_openrouter"),
-    ("anthropic", "_ai_chat_anthropic"),
-    ("google", "_ai_chat_google"),
-    ("groq", "_ai_chat_groq"),
-    ("deepseek", "_ai_chat_deepseek"),
-    ("mistral", "_ai_chat_mistral"),
-    ("perplexity", "_ai_chat_perplexity"),
-]
-
-# Providers preferred ahead of the default order. Set AI_PROVIDER_ORDER="groq,google"
-# to make a funded provider the primary and stop paying latency for exhausted ones.
-_PROVIDER_ORDER_PREFERENCE = [
-    p.strip().lower() for p in os.getenv("AI_PROVIDER_ORDER", "").split(",") if p.strip()
-]
-
-
-def _ordered_ai_providers() -> list[tuple[str, str]]:
-    """Return providers with any AI_PROVIDER_ORDER preferences moved to the front."""
-    if not _PROVIDER_ORDER_PREFERENCE:
-        return list(_AI_PROVIDERS)
-    by_name = dict(_AI_PROVIDERS)
-    ordered = [(name, by_name[name]) for name in _PROVIDER_ORDER_PREFERENCE if name in by_name]
-    ordered.extend(item for item in _AI_PROVIDERS if item[0] not in _PROVIDER_ORDER_PREFERENCE)
-    return ordered
-
-_CHAT_CATEGORY_KEYWORDS = {
-    "programming": ["code", "python", "javascript", "function", "variable", "api", "bug", "debug", "script", "class"],
-    "math": ["calculate", "equation", "algebra", "calculus", "geometry", "number", "arithmetic", "solve", "plus", "minus", "times", "divided", "equals", "sum", "answer", "2+2", "math"],
-    "science": ["physics", "chemistry", "biology", "quantum", "molecule", "atom", "experiment", "research"],
-    "history": ["war", "ancient", "century", "empire", "king", "queen", "revolution", "historical"],
-    "literature": ["book", "novel", "poem", "author", "shakespeare", "story", "novelist", "writing"],
-    "technology": ["computer", "internet", "software", "hardware", "robot", "ai", "digital", "tech"],
-    "philosophy": ["ethics", "morality", "existence", "truth", "knowledge", "wisdom", "meaning"],
-    "health": ["medicine", "doctor", "disease", "treatment", "health", "body", "medical", "patient"],
-}
-
-
-def _categorize_chat(prompt: str, response: str) -> str:
-    """Categorize a chat interaction by keyword matching for MCF3 organization."""
-    text = f"{prompt} {response}".lower()
-    best_category = "general"
-    best_score = 0
-    for category, keywords in _CHAT_CATEGORY_KEYWORDS.items():
-        score = sum(1 for k in keywords if k in text)
-        if score > best_score:
-            best_score = score
-            best_category = category
-    return best_category
-
-
-def _store_ai_chat(prompt: str, response: str, provider: str) -> str:
-    """Categorize and save an AI chat interaction to MCF3 memory + FTP.
-
-    Also trains the neural model synchronously (hot-learning layer) and queues
-    the interaction for background online learning (consolidation layer).
-    """
-    category = _categorize_chat(prompt, response)
-    store = _get_mcf_memory_store()
-    note = f"[{provider}] {response}"
-    record = None
-    # AI notes can be any length; split into <=500-char chunks like import_text,
-    # so long responses still persist instead of failing validation.
-    chunks = []
-    text = note.strip()
-    if text:
-        while len(text) > _MAX_NOTE_CHARS:
-            split_pt = text.rfind(". ", 0, _MAX_NOTE_CHARS)
-            if split_pt == -1:
-                split_pt = text.rfind(" ", 0, _MAX_NOTE_CHARS)
-            if split_pt == -1:
-                split_pt = _MAX_NOTE_CHARS
-            chunks.append(text[:split_pt].strip())
-            text = text[split_pt:].strip(". ")
-        if text:
-            chunks.append(text)
-    for chunk in chunks:
-        try:
-            rec = store.add(chunk, category=f"Knowledge/AI/{category}", source="https://peake-ai.onrender.com/")
-            if rec and getattr(store, "ftp_configured", False):
-                try:
-                    print(
-                        f"📤 FTP upload: host={getattr(store, 'ftp_host', '?')} user={getattr(store, 'ftp_user', '?')} "
-                        f"base_dir={getattr(store, 'ftp_base_dir', None) or '/'} note={len(chunk)} chars"
-                    )
-                    store.upload(rec)
-                except Exception as exc:
-                    print(f"⚠️ AI chat FTP upload failed: {exc}")
-                    rec = None
-            record = rec
-        except Exception as exc:
-            print(f"⚠️ AI chat memory save failed: {exc}")
-    storage = "saved locally"
-    if record and getattr(store, "ftp_configured", False):
-        storage = "saved to shared MCF3/FTP memory"
-    elif not getattr(store, "ftp_configured", False):
-        storage = "saved locally (FTP not configured)"
-
-    # Hot-learning layer: train neural weights on the AI interaction.
-    try:
-        active_model = _get_language_model()
-        with _MODEL_TRAIN_LOCK:
-            active_model.learn_from_conversation(prompt, response, epochs=1)
-        # Long-term consolidation: queue for background online learning.
-        _queue_online_learning(prompt, response, source="ai_chat")
-    except Exception as exc:
-        print(f"⚠️ Neural training on AI chat failed: {exc}")
-
-    return storage
-
-
-def _log_ai_error(provider: str, res) -> None:
-    """Log detailed AI provider error including the response body."""
-    body = ""
-    try:
-        body = res.text[:300]
-    except Exception:
-        pass
-    print(f"⚠️ {provider} returned HTTP {res.status_code}: {body}")
-
-
-def _post_with_model_fallback(provider: str, url: str, headers: dict, payload: dict,
-                              models: list[str], timeout: int = 20):
-    """POST to an OpenAI-compatible endpoint, rolling over on model-not-found.
-
-    Returns the successful ``requests`` response, or ``None`` once every
-    candidate model has failed. A 400/404 (unknown or inaccessible model) moves
-    to the next candidate; other failures (402/403/429/5xx) are billing, quota,
-    or outage problems that a different model ID cannot fix, so they stop the
-    loop immediately.
-    """
-    if not models:
-        return None
-    last_status = None
-    for model in models:
-        try:
-            body = dict(payload)
-            body["model"] = model
-            res = requests.post(url, headers=headers, json=body, timeout=timeout)
-        except Exception as exc:
-            print(f"⚠️ {provider} ({model}) failed: {type(exc).__name__}: {str(exc)[:160]}")
-            continue
-        if res.status_code == 200:
-            if model != models[0]:
-                print(f"ℹ️ {provider}: fell back to model {model}")
-            return res
-        _log_ai_error(f"{provider} ({model})", res)
-        last_status = res.status_code
-        if res.status_code not in (400, 404):
-            return None
-    print(f"⚠️ {provider}: no usable model in {models} (last HTTP {last_status})")
-    return None
-
-
-def _ai_chat_openai(system: str, user: str) -> str | None:
-    """OpenAI chat completions — primary AI provider."""
-    if not OPENAI_API_KEY:
-        return None
-    try:
-        payload = {
-            "model": OPENAI_MODEL,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": 0.7,
-            "max_tokens": 400,
-        }
-        res = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=20,
-        )
-        if res.status_code != 200:
-            _log_ai_error("OpenAI", res)
-            return None
-        data = res.json()
-        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        return answer or None
-    except Exception as exc:
-        print(f"⚠️ OpenAI failed: {type(exc).__name__}: {str(exc)[:160]}")
-        return None
-
-
-def _ai_chat_anthropic(system: str, user: str) -> str | None:
-    """Anthropic Claude — fallback AI provider."""
-    if not ANTHROPIC_API_KEY:
-        return None
-    try:
-        res = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "claude-3-haiku-20240307",
-                "max_tokens": 400,
-                "system": system,
-                "messages": [{"role": "user", "content": user}],
-            },
-            timeout=20,
-        )
-        if res.status_code != 200:
-            _log_ai_error("Anthropic", res)
-            return None
-        data = res.json()
-        answer = (data.get("content", [{}])[0].get("text") or "").strip()
-        return answer or None
-    except Exception as exc:
-        print(f"⚠️ Anthropic failed: {type(exc).__name__}: {str(exc)[:160]}")
-        return None
-
-
-def _ai_chat_google(system: str, user: str) -> str | None:
-    """Google Gemini — fallback AI provider."""
-    if not GOOGLE_API_KEY:
-        return None
-    try:
-        models = [GOOGLE_MODEL] + [m for m in GOOGLE_MODELS if m != GOOGLE_MODEL]
-        res = None
-        for model in models:
-            res = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GOOGLE_API_KEY}",
-                headers={"Content-Type": "application/json"},
-                json={
-                    "contents": [{"parts": [{"text": f"{system}\n\n{user}"}]}],
-                    "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7},
-                },
-                timeout=20,
-            )
-            if res.status_code == 200:
-                break
-            _log_ai_error(f"Google ({model})", res)
-            if res.status_code not in (400, 404):
-                return None
-        if res is None or res.status_code != 200:
-            return None
-        data = res.json()
-        answer = (data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text") or "").strip()
-        return answer or None
-    except Exception as exc:
-        print(f"⚠️ Google failed: {type(exc).__name__}: {str(exc)[:160]}")
-        return None
-
-
-def _ai_chat_groq(system: str, user: str) -> str | None:
-    """Groq — fallback AI provider (fast inference)."""
-    if not GROQ_API_KEY:
-        return None
-    try:
-        res = _post_with_model_fallback(
-            "Groq",
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            payload={
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.7,
-                "max_tokens": 400,
-            },
-            models=GROQ_MODELS,
-        )
-        if res is None:
-            return None
-        data = res.json()
-        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        return answer or None
-    except Exception as exc:
-        print(f"⚠️ Groq failed: {type(exc).__name__}: {str(exc)[:160]}")
-        return None
-
-
-def _ai_chat_deepseek(system: str, user: str) -> str | None:
-    """DeepSeek — fallback AI provider."""
-    if not DEEPSEEK_API_KEY:
-        return None
-    try:
-        res = requests.post(
-            "https://api.deepseek.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "deepseek-chat",
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.7,
-                "max_tokens": 400,
-            },
-            timeout=20,
-        )
-        if res.status_code != 200:
-            _log_ai_error("DeepSeek", res)
-            return None
-        data = res.json()
-        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        return answer or None
-    except Exception as exc:
-        print(f"⚠️ DeepSeek failed: {type(exc).__name__}: {str(exc)[:160]}")
-        return None
-
-
-def _ai_chat_mistral(system: str, user: str) -> str | None:
-    """Mistral — fallback AI provider."""
-    if not MISTRAL_API_KEY:
-        return None
-    try:
-        res = requests.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {MISTRAL_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "mistral-small-latest",
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.7,
-                "max_tokens": 400,
-            },
-            timeout=20,
-        )
-        if res.status_code != 200:
-            _log_ai_error("Mistral", res)
-            return None
-        data = res.json()
-        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        return answer or None
-    except Exception as exc:
-        print(f"⚠️ Mistral failed: {type(exc).__name__}: {str(exc)[:160]}")
-        return None
-
-
-def _ai_chat_perplexity(system: str, user: str) -> str | None:
-    """Perplexity — fallback AI provider (search-augmented)."""
-    if not PERPLEXITY_API_KEY:
-        return None
-    try:
-        res = requests.post(
-            "https://api.perplexity.ai/chat/completions",
-            headers={
-                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "sonar",
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.7,
-                "max_tokens": 400,
-            },
-            timeout=20,
-        )
-        if res.status_code != 200:
-            _log_ai_error("OpenAI", res)
-            return None
-        data = res.json()
-        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        return answer or None
-    except Exception as exc:
-        print(f"⚠️ OpenAI failed: {type(exc).__name__}: {str(exc)[:160]}")
-        return None
-
-
-def _ai_chat_openrouter(system: str, user: str) -> str | None:
-    """OpenRouter — aggregator giving access to many models via one key."""
-    if not OPENROUTER_API_KEY:
-        return None
-    try:
-        models = [OPENROUTER_MODEL] + [m for m in OPENROUTER_MODELS if m != OPENROUTER_MODEL]
-        res = _post_with_model_fallback(
-            "OpenRouter",
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://peakebot.ai",
-                "X-Title": "PeakeBot Harold",
-            },
-            payload={
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.7,
-                "max_tokens": 400,
-            },
-            models=models,
-        )
-        if res is None:
-            return None
-        data = res.json()
-        answer = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        return answer or None
-    except Exception as exc:
-        print(f"⚠️ OpenRouter failed: {type(exc).__name__}: {str(exc)[:160]}")
-        return None
-
-
-def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]:
-    """Try AI providers in order: OpenAI first, then fallbacks.
-
-    Returns a dict with:
-      answer: the AI response text, or None
-      provider: the provider name that answered, or None
-      tried: list of provider names attempted
-      failures: dict of provider_name -> error message for failed providers
-    """
-    system = (
-        "You are Harold, a helpful AI assistant. Answer concisely and "
-        "accurately. If you are unsure, say so. Do not invent facts."
-    )
-    user = prompt
-    if memory_context:
-        user = f"Relevant prior context: {memory_context}\n\nUser question: {prompt}"
-
-    result: dict[str, Any] = {
-        "answer": None,
-        "provider": None,
-        "tried": [],
-        "failures": {},
-    }
-
-    # First try all API-based providers
-    for provider_name, func_name in _ordered_ai_providers():
-        result["tried"].append(provider_name)
-
-        # Skip providers without an API key, but record why so the user sees
-        # exactly which ones were bypassed instead of silently ignored.
-        key_var = {
-            "openai": OPENAI_API_KEY,
-            "openrouter": OPENROUTER_API_KEY,
-            "anthropic": ANTHROPIC_API_KEY,
-            "google": GOOGLE_API_KEY,
-            "groq": GROQ_API_KEY,
-            "deepseek": DEEPSEEK_API_KEY,
-            "mistral": MISTRAL_API_KEY,
-            "perplexity": PERPLEXITY_API_KEY,
-        }.get(provider_name, "")
-        if provider_name != "g4f" and not key_var:
-            result["failures"][provider_name] = "no API key configured"
-            print(f"⚠️ AI provider {provider_name} skipped: no API key configured")
-            continue
-
-        try:
-            func = globals()[func_name]
-            answer = func(system, user)
-            if answer:
-                result["answer"] = answer
-                result["provider"] = provider_name
-                return result
-        except Exception as exc:
-            msg = f"{type(exc).__name__}: {str(exc)[:120]}"
-            result["failures"][provider_name] = msg
-            print(f"⚠️ AI provider {provider_name} failed: {msg}")
-            continue
-
-    # If no API-based providers worked, try g4f
-    if not result["answer"] and "g4f" not in result["tried"]:
-        print("⚠️ All API providers failed, trying g4f fallback...")
-        try:
-            func = globals()["_ai_chat_g4f"]
-            answer = func(system, user)
-            if answer:
-                result["answer"] = answer
-                result["provider"] = "g4f"
-                result["tried"].append("g4f")
-                return result
-        except Exception as exc:
-            msg = f"{type(exc).__name__}: {str(exc)[:120]}"
-            result["failures"]["g4f"] = msg
-            print(f"⚠️ g4f fallback failed: {msg}")
-
-    return result
-
-
-_SELF_TALK_DEFAULT_SYSTEM = "You are Harold, a careful and concise AI assistant. Answer accurately and say when unsure."
-
-
-def _query_ai_providers_for_self_talk(
-    messages: list | str,
-    purpose: str = "consensus",
-    max_providers: int | None = None,
-) -> dict[str, Any]:
-    """Ask every configured AI provider and return *all* answers, for self-talk.
-
-    Unlike ``_ai_chat_completion`` (first success wins), self-talk needs the
-    other models' answers so it can check them against each other.
-
-    ``messages`` is either a plain user string or ``[("system", ...), ("user", ...)]``.
-    ``purpose="single"`` stops at the first answer (critic role); ``"consensus"``
-    collects up to ``SELF_TALK_MAX_MODELS`` answers for cross-checking.
-    """
-    if isinstance(messages, str):
-        system, user = _SELF_TALK_DEFAULT_SYSTEM, messages
-    else:
-        system = " ".join(text for role, text in messages if role == "system").strip() or _SELF_TALK_DEFAULT_SYSTEM
-        user = "\n\n".join(text for role, text in messages if role != "system").strip()
-    limit = max_providers or int(os.getenv("SELF_TALK_MAX_MODELS", "4"))
-
-    result: dict[str, Any] = {"answers": {}, "order": [], "failures": {}}
-    if not user:
-        return result
-    for provider_name, func_name in _ordered_ai_providers():
-        if len(result["answers"]) >= limit:
-            break
-        key_var = {
-            "openai": OPENAI_API_KEY,
-            "openrouter": OPENROUTER_API_KEY,
-            "anthropic": ANTHROPIC_API_KEY,
-            "google": GOOGLE_API_KEY,
-            "groq": GROQ_API_KEY,
-            "deepseek": DEEPSEEK_API_KEY,
-            "mistral": MISTRAL_API_KEY,
-            "perplexity": PERPLEXITY_API_KEY,
-            "g4f": "free",  # g4f doesn't require an API key
-        }.get(provider_name, "")
-        if not key_var:
-            continue
-        try:
-            answer = globals()[func_name](system, user)
-        except Exception as exc:
-            result["failures"][provider_name] = f"{type(exc).__name__}: {str(exc)[:120]}"
-            continue
-        if answer and str(answer).strip():
-            result["answers"][provider_name] = str(answer).strip()
-            result["order"].append(provider_name)
-            if purpose == "single":
-                break
-    return result
-
-
 def generate_response(prompt, conversation_history=None):
     """Answer conversationally, recall MCF3 context, and synthesize web research when needed."""
     raw_prompt = (prompt or "").strip()
@@ -4179,61 +2715,12 @@ def generate_response(prompt, conversation_history=None):
         remember(raw_prompt, website_learning_response)
         return website_learning_response
 
-    dictionary_response = _handle_dictionary_request(raw_prompt)
-    if dictionary_response is not None:
-        remember(raw_prompt, dictionary_response)
-        return dictionary_response
-
-    wikipedia_response = _handle_wikipedia_request(raw_prompt)
-    if wikipedia_response is not None:
-        remember(raw_prompt, wikipedia_response)
-        return wikipedia_response
-
-    gutenberg_response = _handle_gutenberg_request(raw_prompt)
-    if gutenberg_response is not None:
-        remember(raw_prompt, gutenberg_response)
-        return gutenberg_response
-
-    organize_response = _handle_organize_request(raw_prompt)
-    if organize_response is not None:
-        return organize_response
-
     math_response = _handle_math_request(raw_prompt)
     if math_response is not None:
         if math_response.startswith(("Verified arithmetic:", "Saved as an unverified math note:", "I already have")):
             _get_intent_learner().learn_intent(raw_prompt, "math")
         remember(raw_prompt, math_response)
         return math_response
-
-    weather_response = _handle_weather_request(raw_prompt)
-    if weather_response is not None:
-        remember(raw_prompt, weather_response)
-        return weather_response
-
-    weather_followup_response = _handle_weather_followup_request(raw_prompt, history)
-    if weather_followup_response is not None:
-        remember(raw_prompt, weather_followup_response)
-        return weather_followup_response
-
-    code_response = _handle_code_generation_request(raw_prompt)
-    if code_response is not None:
-        remember(raw_prompt, code_response)
-        return code_response
-
-    clock_response = _handle_clock_request(raw_prompt)
-    if clock_response is not None:
-        remember(raw_prompt, clock_response)
-        return clock_response
-
-    calendar_add_response = _handle_calendar_add_request(raw_prompt)
-    if calendar_add_response is not None:
-        remember(raw_prompt, calendar_add_response)
-        return calendar_add_response
-
-    calendar_response = _handle_calendar_request(raw_prompt)
-    if calendar_response is not None:
-        remember(raw_prompt, calendar_response)
-        return calendar_response
 
     saved_response = _save_explicit_mcf_memory(raw_prompt)
     if saved_response is not None:
@@ -4267,48 +2754,6 @@ def generate_response(prompt, conversation_history=None):
         remember(raw_prompt, basic_reply)
         return basic_reply
 
-    # PRIMARY: AI providers first — OpenAI → OpenRouter → Anthropic → Google →
-    # Groq → Deepseek → Mistral → Perplexity. Local memory is only a fallback.
-    ai_result = _ai_chat_completion(raw_prompt, "")
-    ai_answer = ai_result.get("answer")
-    ai_provider = ai_result.get("provider")
-    if ai_answer:
-        storage = _store_ai_chat(raw_prompt, ai_answer, ai_provider or "unknown")
-        ai_answer = ai_answer.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
-        remember(raw_prompt, ai_answer)
-        return f"{ai_answer}\n\n(Answered via {ai_provider}; {storage}.)"
-
-    # All AI providers failed or returned nothing — fall back to local memory.
-    tried = ai_result.get("tried", []) or []
-    failures = ai_result.get("failures", {}) or {}
-    provider_note = ""
-    if tried:
-        failed_list = [f"{p} ({failures.get(p, 'no response')})" for p in tried if p in failures]
-        if failed_list:
-            provider_note = f"\n\n(AI providers tried: {', '.join(failed_list)} — all unavailable right now.)"
-        else:
-            provider_note = f"\n\n(AI providers tried: {', '.join(tried)} — none returned an answer.)"
-
-    # If g4f was tried and failed, make sure we have a helpful error message
-    if "g4f" in tried:
-        g4f_error = failures.get("g4f", "unknown error")
-        provider_note = f"\n\n(g4f fallback also failed: {g4f_error})"
-
-    # If no providers were tried, try g4f explicitly as a fallback
-    if not tried:
-        print("⚠️ No AI providers tried, attempting g4f fallback...")
-        try:
-            ai_result = _ai_chat_completion(prompt, memory_context)
-            ai_answer = ai_result.get("answer")
-            ai_provider = ai_result.get("provider")
-            if ai_answer:
-                storage = _store_ai_chat(prompt, ai_answer, ai_provider or "unknown")
-                ai_answer = ai_answer.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
-                remember(prompt, ai_answer)
-                return f"{ai_answer}\n\n(Answered via {ai_provider} fallback; {storage}.)"
-        except Exception as exc:
-            print(f"⚠️ g4f fallback failed: {exc}")
-
     memory_query = raw_prompt
     previous_user = next((item["content"] for item in reversed(history) if item["role"] == "user"), "")
     if previous_user:
@@ -4337,18 +2782,19 @@ def generate_response(prompt, conversation_history=None):
             print(f"⚠️ Web research failed: {exc}")
             return {"hits": [], "text": None}
 
-    # An explicit request to search takes priority.
+    # An explicit request to search takes priority. Uncertain answers also trigger
+    # synchronous research before Harold responds.
     if web_trigger:
         verified = research()
         response = _answer_from_research(raw_prompt, verified.get("hits", []), history, memory_context)
         if verified.get("hits"):
             _get_intent_learner().learn_intent(raw_prompt, "search")
         remember(raw_prompt, response)
-        return response + provider_note
+        return response
 
     user_prompt = build_conversation_prompt(raw_prompt, history, memory_context)
 
-    # LAST RESORT: local neural model (kept running even without AI keys).
+    response = ""
     try:
         active_model = _get_language_model()
         with _MODEL_TRAIN_LOCK:
@@ -4357,7 +2803,8 @@ def generate_response(prompt, conversation_history=None):
         print(f"⚠️ Model generation failed, using fallback logic: {exc}")
         response = ""
 
-    # If Harold says he is unsure, research synchronously before giving up.
+    # If Harold says he is unsure, research synchronously and return the best
+    # results found without sending stored memory or research data to the model API.
     if not web_trigger and _response_seems_low_confidence(response):
         verified = research()
         if verified.get("hits"):
@@ -4368,19 +2815,22 @@ def generate_response(prompt, conversation_history=None):
             except Exception:
                 pass
             remember(raw_prompt, response)
-            return response + provider_note
+            return response
+
+    if not response or _response_seems_low_confidence(response):
+        g4f_go_answer = _ai_chat_g4f_go(user_prompt)
+        if g4f_go_answer:
+            response = g4f_go_answer
 
     if not response or _response_seems_low_confidence(response):
         response = (
             "I’m not well informed on this yet. I tried to research it, but "
             "couldn’t find enough reliable information to give you a confident answer."
         )
-        if tried:
-            response += f"\n\n(AI providers attempted: {', '.join(tried)} — all unavailable right now.)"
 
     response = response.replace("Harold:", "").replace("PeakeBot:", "").replace("SYSTEM:", "").strip()
     remember(raw_prompt, response)
-    return response + provider_note
+    return response
 
 def post_to_hive(title, body):
     hive = init_hive()
@@ -4412,7 +2862,9 @@ def save_to_geocities(entries, day_str: str | None = None) -> bool:
         if not entries:
             return True
 
-        ftp = _ftp_connect_for_upload()
+        ftp = FTP(FTP_HOST)
+        ftp.login(FTP_USER, FTP_PASS)
+        _ftp_use_passive(ftp)
         _ensure_ftp_directory(ftp, _resolved_ftp_base_dir())
 
         # Do not treat a failed directory listing as an empty archive: the
@@ -4461,8 +2913,7 @@ def save_to_geocities(entries, day_str: str | None = None) -> bool:
             f.write(candidate_bytes)
 
         with open(local_group_path, "rb") as file:
-            payload = file.read()
-        _ftp_store_knowledge_group(ftp, current_filename, payload)
+            _ftp_store_binary(ftp, current_filename, file)
 
         print(f"📦 Saved to {current_filename} ({len(candidate_bytes) / (1024 * 1024):.2f} MB)")
 
@@ -4489,8 +2940,6 @@ def save_to_geocities(entries, day_str: str | None = None) -> bool:
         with open(local_path, "w", encoding="utf-8") as f:
             json.dump(memory, f, indent=2)
         
-        # memory.json is rewritten whole each time, so a single store is
-        # cheaper than splitting it into appended blocks.
         with open(local_path, "rb") as file:
             _ftp_store_binary(ftp, "memory.json", file)
 
@@ -4536,73 +2985,6 @@ def _ftp_store_binary(ftp: FTP, remote_name: str, data) -> None:
         except Exception:
             pass
         ftp.storbinary(f"STOR {remote_name}", data)
-
-
-def _ftp_connect_for_upload(timeout: float = 20.0, attempts: int = 3) -> FTP:
-    """Connect, log in, and select the archive folder with bounded retries.
-
-    The old path dialled with no timeout at all, so one unresponsive server
-    could hang a chat turn indefinitely. Each attempt gets a fresh client.
-    """
-    last_error: Exception | None = None
-    for attempt in range(max(1, attempts)):
-        ftp = FTP(timeout=timeout)
-        try:
-            ftp.connect(FTP_HOST, timeout=timeout)
-            ftp.login(FTP_USER, FTP_PASS)
-            _ftp_use_passive(ftp)
-            return ftp
-        except ftplib.error_perm:
-            try:
-                ftp.close()
-            except Exception:
-                pass
-            raise
-        except (OSError, EOFError, ftplib.error_temp, ftplib.error_reply) as exc:
-            last_error = exc
-            try:
-                ftp.close()
-            except Exception:
-                pass
-            if attempt + 1 < attempts:
-                time.sleep(min(8, 2 ** attempt))
-    raise RuntimeError(
-        f"FTP connect/login failed after {attempts} attempt(s): {type(last_error).__name__}: {last_error}"
-    ) from last_error
-
-
-def _ftp_store_knowledge_group(ftp: FTP, remote_name: str, payload: bytes, block_size: int = 256 * 1024) -> None:
-    """Store an archive file in bounded blocks, retrying the failed block only.
-
-    One large ``storbinary`` call means a single dropped data channel loses the
-    whole day's file and forces a full re-login to retry. Sending fixed-size
-    blocks lets a transient failure resume where it stopped instead of
-    restarting the upload.
-    """
-    total = len(payload)
-    if total <= block_size:
-        _ftp_store_binary(ftp, remote_name, io.BytesIO(payload))
-        return
-    mode = "STOR"
-    offset = 0
-    attempts = 0
-    while offset < total:
-        block = payload[offset:offset + block_size]
-        command = f"{mode} {remote_name}"
-        try:
-            ftp.storbinary(command, io.BytesIO(block))
-        except ftplib.all_errors as exc:
-            attempts += 1
-            if isinstance(exc, ftplib.error_perm) or attempts > _FTP_BLOCK_MAX_ATTEMPTS:
-                raise
-            try:
-                ftp.set_pasv(False)
-            except Exception:
-                pass
-            continue
-        attempts = 0
-        offset += len(block)
-        mode = "APPE"
 
 
 def _ftp_retr_binary(ftp: FTP, remote_name: str, callback) -> None:
@@ -4760,9 +3142,6 @@ def startup_ftp_sync() -> dict:
     """Run the full FTP archive sync on boot and from the admin panel."""
     print("📡 Startup FTP sync: archiving local session logs and cached notes...", flush=True)
     report = upload_missing_session_logs()
-    # Pull the archive index and mesh into RAM once, so the first chat turn
-    # searches local memory instead of waiting on FTP.
-    warm_memory_index()
     if report["ok"]:
         print(
             f"✅ Startup FTP sync complete: {report['conversation_entries']} log entr(ies) across "
@@ -4809,7 +3188,6 @@ def _generate_webpage_via_ftp(entries, ftp: FTP):
     <body>
     <h1>🧠 Harold Public Journal</h1>
     <p>AI entries generated by Harold running on Raspberry Pi and published to GeoCities</p>
-    <p><a href="https://ecency.com/@thejudithgroup">The Judith Group on Ecency</a></p>
     <hr>
     """
     for entry in reversed(entries):
@@ -4832,7 +3210,6 @@ def generate_webpage(entries):
     <body>
     <h1>🧠 Harold Public Journal</h1>
     <p>AI entries generated by Harold running on Raspberry Pi and published to GeoCities</p>
-    <p><a href="https://ecency.com/@thejudithgroup">The Judith Group on Ecency</a></p>
     <hr>
     """
     for entry in reversed(entries):

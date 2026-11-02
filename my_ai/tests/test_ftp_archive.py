@@ -47,9 +47,6 @@ class FakeFTP:
         self.pasv = True
         self.fail_passive = False
 
-    def connect(self, host=None, timeout=None):
-        return "220 OK"
-
     def login(self, user, password):
         return "230 OK"
 

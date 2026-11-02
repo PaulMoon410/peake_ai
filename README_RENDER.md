@@ -49,6 +49,13 @@ Optional FTP runtime variables:
 
 No Render start-command change is needed: the current `web_app:app` process now hosts the integrated experience. The existing PeakeBot/Harold FTP settings are reused; do not put credentials in `render.yaml` or commit them to GitHub.
 
+Optional final g4f-go fallback (Harold and g4f-go on the same Lubuntu server):
+- Add `G4F_GO_BASE_URL=http://127.0.0.1:10000` to the project's local `.env` file. `web_app.py` loads `.env` at startup, and `.env` is ignored by Git. Using loopback avoids depending on LAN routing when both processes run on this server.
+- Harold appends `/v1/chat/completions` and tries g4f-go only after the existing local model fails or produces a low-confidence answer. Research answers also prefer the local model first. This assumes g4f-go exposes an OpenAI-compatible chat-completions endpoint at that path.
+- Set `G4F_GO_MODEL` to a model ID supported by the g4f-go service (defaults to `gpt-4o-mini`).
+- If the service requires bearer authentication, add `G4F_GO_API_KEY` to `.env`; do not commit or share the key.
+- Restart Harold after changing `.env`. If g4f-go runs on a different machine, use its LAN address instead of `127.0.0.1` and ensure Harold's server can reach it. Do not expose an unauthenticated g4f-go service publicly.
+
 Pocket AI's MCF3 recall uses the same FTP credentials and base directory, but writes to its own archive file so it does not overwrite the existing PeakeBot archive:
 - Default archive: pocket-ai-memory.jsonl (plus numbered shards as capped files fill)
 - Optional MEMORY_FTP_PATH overrides that archive filename/path.

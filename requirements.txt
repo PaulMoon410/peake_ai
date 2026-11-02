@@ -19,3 +19,6 @@ semantic-router>=0.0.1,<1.0
 # Autonomous learning helpers (optional, free, no API keys).
 g4f>=0.2.0  # Install with: pip install -U g4f[all]
 duckduckgo-search>=6.0.0
+
+# Optional: allowlisted SSH helper (my_ai/ssh_tools.py)
+paramiko>=3.4
