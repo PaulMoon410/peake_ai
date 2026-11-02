@@ -51,6 +51,7 @@ class G4fGoProviderTests(unittest.TestCase):
     def test_junk_filter(self) -> None:
         self.assertTrue(peakebot._looks_like_provider_junk("Sign up and repeat your request."))
         self.assertTrue(peakebot._looks_like_provider_junk(""))
+        self.assertFalse(peakebot._looks_like_provider_junk("3"))
         self.assertFalse(peakebot._looks_like_provider_junk("Sure, I can walk you through nmap basics."))
 
 

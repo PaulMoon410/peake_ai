@@ -4054,7 +4054,7 @@ _PROVIDER_JUNK_MARKERS = (
 def _looks_like_provider_junk(answer: str | None) -> bool:
     """True for empty replies or provider boilerplate (sign-up walls, rate limits, errors)."""
     text = (answer or "").strip().lower()
-    if len(text) < 2:
+    if not text:
         return True
     return len(text) < 300 and any(marker in text for marker in _PROVIDER_JUNK_MARKERS)
 
