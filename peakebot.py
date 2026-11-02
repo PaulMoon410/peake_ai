@@ -76,6 +76,9 @@ PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "").strip()
 G4F_GO_BASE_URL = os.getenv("G4F_GO_BASE_URL", "").strip()
 G4F_GO_API_KEY = os.getenv("G4F_GO_API_KEY", "").strip()
 G4F_GO_MODEL = os.getenv("G4F_GO_MODEL", "auto").strip()
+G4F_SPACE_API_KEY = os.getenv("G4F_SPACE_API_KEY", "").strip()
+G4F_SPACE_BASE_URL = os.getenv("G4F_SPACE_BASE_URL", "https://g4f.space/v1").strip()
+G4F_SPACE_MODEL = os.getenv("G4F_SPACE_MODEL", "auto").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free").strip()
 # Model IDs to try per provider. Keys without credit/access still rank first when
@@ -3633,6 +3636,7 @@ _AI_PROVIDERS = [
     ("deepseek", "_ai_chat_deepseek"),
     ("mistral", "_ai_chat_mistral"),
     ("perplexity", "_ai_chat_perplexity"),
+    ("g4f-space", "_ai_chat_g4f_space"),  # Hosted g4f.space (needs G4F_SPACE_API_KEY)
     ("g4f-go", "_ai_chat_g4f_go"),  # Final fallback: local g4f-go server
 ]
 
@@ -4043,6 +4047,32 @@ def _ai_chat_openrouter(system: str, user: str) -> str | None:
         return None
 
 
+def _ai_chat_g4f_space(system: str, user: str) -> str | None:
+    """Query the hosted g4f.space OpenAI-compatible API (key from g4f.dev/api_key.html)."""
+    if not G4F_SPACE_API_KEY:
+        return None
+    response = requests.post(
+        G4F_SPACE_BASE_URL.rstrip("/") + "/chat/completions",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + G4F_SPACE_API_KEY,
+        },
+        json={
+            "model": G4F_SPACE_MODEL,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.7,
+        },
+        timeout=60,
+    )
+    if not 200 <= response.status_code < 300:
+        raise RuntimeError(f"g4f.space returned HTTP {response.status_code}")
+    answer = response.json()["choices"][0]["message"]["content"]
+    return answer.strip() if isinstance(answer, str) and answer.strip() else None
+
+
 _PROVIDER_JUNK_MARKERS = (
     "sign up", "sign in", "log in", "login to", "create an account", "repeat your request",
     "rate limit", "too many requests", "captcha", "verify you are human", "access denied",
@@ -4124,6 +4154,7 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
             "deepseek": DEEPSEEK_API_KEY,
             "mistral": MISTRAL_API_KEY,
             "perplexity": PERPLEXITY_API_KEY,
+            "g4f-space": G4F_SPACE_API_KEY,
         }.get(provider_name, "")
         if provider_name == "g4f-go":
             if not G4F_GO_BASE_URL:
@@ -4209,6 +4240,8 @@ def _query_ai_providers_for_self_talk(
             "deepseek": DEEPSEEK_API_KEY,
             "mistral": MISTRAL_API_KEY,
             "perplexity": PERPLEXITY_API_KEY,
+            "g4f-space": G4F_SPACE_API_KEY,
+            "g4f-go": G4F_GO_BASE_URL,
             "g4f": "free",  # g4f doesn't require an API key
         }.get(provider_name, "")
         if not key_var:

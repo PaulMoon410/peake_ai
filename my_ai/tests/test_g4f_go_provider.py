@@ -48,6 +48,24 @@ class G4fGoProviderTests(unittest.TestCase):
     def test_is_last_provider(self) -> None:
         self.assertEqual("g4f-go", peakebot._AI_PROVIDERS[-1][0])
 
+    def test_g4f_space_disabled_without_key(self) -> None:
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(peakebot, "G4F_SPACE_API_KEY", ""))
+            post = stack.enter_context(patch.object(peakebot.requests, "post"))
+            self.assertIsNone(peakebot._ai_chat_g4f_space("sys", "hi"))
+        post.assert_not_called()
+
+    def test_g4f_space_request(self) -> None:
+        response = Mock(status_code=200)
+        response.json.return_value = {"choices": [{"message": {"content": " ok "}}]}
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(peakebot, "G4F_SPACE_API_KEY", "k"))
+            post = stack.enter_context(
+                patch.object(peakebot.requests, "post", return_value=response)
+            )
+            self.assertEqual("ok", peakebot._ai_chat_g4f_space("sys", "hi"))
+        self.assertEqual("https://g4f.space/v1/chat/completions", post.call_args[0][0])
+
     def test_junk_filter(self) -> None:
         self.assertTrue(peakebot._looks_like_provider_junk("Sign up and repeat your request."))
         self.assertTrue(peakebot._looks_like_provider_junk(""))
