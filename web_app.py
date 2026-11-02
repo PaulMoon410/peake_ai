@@ -1088,6 +1088,76 @@ def api_selftalk_thread() -> Response:
         return jsonify({"ok": False, "error": str(exc), "turns": [], "next": after}), 500
 
 
+def _message_text(content) -> str:
+    if isinstance(content, list):
+        return "\n".join(
+            str(part.get("text", "")) for part in content if isinstance(part, dict)
+        ).strip()
+    return str(content or "").strip()
+
+
+@app.route("/v1/models", methods=["GET"])
+def openai_models() -> Response:
+    return jsonify({"object": "list", "data": [{"id": "harold", "object": "model", "owned_by": "harold"}]})
+
+
+@app.route("/v1/chat/completions", methods=["POST", "OPTIONS"])
+def openai_chat_completions() -> Response:
+    """OpenAI-compatible wrapper so IDE extensions can use Harold as a model."""
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True})
+    if CHAT_API_KEY:
+        incoming = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(incoming, CHAT_API_KEY):
+            return jsonify({"error": {"message": "invalid api key", "type": "auth"}}), 401
+
+    payload = request.get_json(silent=True) or {}
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return jsonify({"error": {"message": "messages is required", "type": "invalid_request"}}), 400
+    turns = [
+        {"role": m.get("role"), "content": _message_text(m.get("content"))}
+        for m in messages
+        if isinstance(m, dict) and m.get("role") in {"user", "assistant"}
+    ]
+    if not turns or turns[-1]["role"] != "user" or not turns[-1]["content"]:
+        return jsonify({"error": {"message": "last message must be a non-empty user message", "type": "invalid_request"}}), 400
+
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_rate_limit(client_ip):
+        return jsonify({"error": {"message": "rate limit exceeded", "type": "rate_limit"}}), 429
+
+    prompt = turns[-1]["content"]
+    history = normalize_history(turns[:-1])
+    with _GENERATION_LOCK:
+        try:
+            text = generate_response(prompt, conversation_history=history)
+        except Exception as exc:
+            return jsonify({"error": {"message": f"generation failed: {exc}", "type": "server_error"}}), 500
+
+    created = int(time.time())
+    text = re.sub(r"\n*\(Answered via [^)]*\)\s*$", "", text).strip()
+    completion_id = f"chatcmpl-harold-{created}"
+    if payload.get("stream"):
+        import json as _json
+
+        def _sse():
+            base = {"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": "harold"}
+            yield "data: " + _json.dumps({**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}]}) + "\n\n"
+            yield "data: " + _json.dumps({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}) + "\n\n"
+            yield "data: [DONE]\n\n"
+
+        return Response(_sse(), mimetype="text/event-stream")
+    return jsonify({
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": "harold",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    })
+
+
 @app.route("/api/chat", methods=["POST", "OPTIONS"])
 def api_chat() -> Response:
     if request.method == "OPTIONS":
