@@ -4188,7 +4188,7 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
         try:
             func = globals()["_ai_chat_g4f"]
             answer = func(system, user)
-            if answer:
+            if answer and not _looks_like_provider_junk(answer):
                 result["answer"] = answer
                 result["provider"] = "g4f"
                 result["tried"].append("g4f")
@@ -4251,7 +4251,7 @@ def _query_ai_providers_for_self_talk(
         except Exception as exc:
             result["failures"][provider_name] = f"{type(exc).__name__}: {str(exc)[:120]}"
             continue
-        if answer and str(answer).strip():
+        if answer and str(answer).strip() and not _looks_like_provider_junk(str(answer)):
             result["answers"][provider_name] = str(answer).strip()
             result["order"].append(provider_name)
             if purpose == "single":

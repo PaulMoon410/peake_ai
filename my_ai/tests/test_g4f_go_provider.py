@@ -66,6 +66,22 @@ class G4fGoProviderTests(unittest.TestCase):
             self.assertEqual("ok", peakebot._ai_chat_g4f_space("sys", "hi"))
         self.assertEqual("https://g4f.space/v1/chat/completions", post.call_args[0][0])
 
+    def test_self_talk_skips_provider_junk(self) -> None:
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(peakebot, "_AI_PROVIDERS", [("g4f", "_ai_chat_g4f"), ("g4f-go", "_ai_chat_g4f_go")])
+            )
+            stack.enter_context(patch.object(peakebot, "_PROVIDER_ORDER_PREFERENCE", []))
+            stack.enter_context(patch.object(peakebot, "G4F_GO_BASE_URL", "http://x"))
+            stack.enter_context(
+                patch.dict(peakebot.__dict__, {"_ai_chat_g4f": lambda s, u: "Sign up and repeat your request."})
+            )
+            stack.enter_context(
+                patch.dict(peakebot.__dict__, {"_ai_chat_g4f_go": lambda s, u: "Real answer."})
+            )
+            result = peakebot._query_ai_providers_for_self_talk("hi")
+        self.assertEqual({"g4f-go": "Real answer."}, result["answers"])
+
     def test_junk_filter(self) -> None:
         self.assertTrue(peakebot._looks_like_provider_junk("Sign up and repeat your request."))
         self.assertTrue(peakebot._looks_like_provider_junk(""))
