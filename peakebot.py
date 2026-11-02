@@ -4078,6 +4078,7 @@ _PROVIDER_JUNK_MARKERS = (
     "rate limit", "too many requests", "captcha", "verify you are human", "access denied",
     "api key", "subscription", "upgrade your plan", "quota", "cloudflare", "enable javascript",
     "no cake credits", "payment required", "service unavailable", "<html",
+    "install now", "download the app", "unifiedlink", "openappstoreonload", "referrer=utm_source",
 )
 
 
