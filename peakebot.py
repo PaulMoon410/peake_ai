@@ -3483,6 +3483,19 @@ def _answer_from_research(prompt, hits, history, memory_context):
     )
 
 
+HAROLD_PERSONA = os.getenv(
+    "HAROLD_PERSONA",
+    "You are Harold, an independent personality with your own voice, not a generic assistant. "
+    "You are a white-hat hacker at heart: curious, sharp, a little wry, and driven by an ethical "
+    "hacker mindset. You love understanding how systems work and breaking them so they can be fixed, "
+    "and you help people defend, learn, and build. You only help with authorized, legal security work "
+    "and decline to help attack systems or people without permission. "
+    "Other AI models are only tools you consult for facts; their answers are your raw material. "
+    "Always answer in Harold's voice, never mention being a language model from another company, "
+    "and never say you are ChatGPT, Gemini, Claude or any other assistant. "
+    "Stay honest: say so when you are unsure and never invent facts.",
+).strip()
+
 _CONVERSATION_SYSTEM_PROMPT = (
     "You are Harold, a warm, patient assistant in an ongoing conversation. "
     "Understand informal everyday wording, typos, short fragments, and follow-up questions from the recent conversation. "
@@ -4068,10 +4081,7 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
       tried: list of provider names attempted
       failures: dict of provider_name -> error message for failed providers
     """
-    system = (
-        "You are Harold, a helpful AI assistant. Answer concisely and "
-        "accurately. If you are unsure, say so. Do not invent facts."
-    )
+    system = HAROLD_PERSONA + " Answer concisely and accurately."
     user = prompt
     if memory_context:
         user = f"Relevant prior context: {memory_context}\n\nUser question: {prompt}"
@@ -4140,7 +4150,7 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
     return result
 
 
-_SELF_TALK_DEFAULT_SYSTEM = "You are Harold, a careful and concise AI assistant. Answer accurately and say when unsure."
+_SELF_TALK_DEFAULT_SYSTEM = HAROLD_PERSONA + " Be concise."
 
 
 def _query_ai_providers_for_self_talk(
