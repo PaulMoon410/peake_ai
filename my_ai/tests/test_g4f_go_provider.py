@@ -48,6 +48,11 @@ class G4fGoProviderTests(unittest.TestCase):
     def test_is_last_provider(self) -> None:
         self.assertEqual("g4f-go", peakebot._AI_PROVIDERS[-1][0])
 
+    def test_junk_filter(self) -> None:
+        self.assertTrue(peakebot._looks_like_provider_junk("Sign up and repeat your request."))
+        self.assertTrue(peakebot._looks_like_provider_junk(""))
+        self.assertFalse(peakebot._looks_like_provider_junk("Sure, I can walk you through nmap basics."))
+
 
 if __name__ == "__main__":
     unittest.main()

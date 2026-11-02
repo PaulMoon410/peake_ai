@@ -4043,6 +4043,22 @@ def _ai_chat_openrouter(system: str, user: str) -> str | None:
         return None
 
 
+_PROVIDER_JUNK_MARKERS = (
+    "sign up", "sign in", "log in", "login to", "create an account", "repeat your request",
+    "rate limit", "too many requests", "captcha", "verify you are human", "access denied",
+    "api key", "subscription", "upgrade your plan", "quota", "cloudflare", "enable javascript",
+    "no cake credits", "payment required", "service unavailable", "<html",
+)
+
+
+def _looks_like_provider_junk(answer: str | None) -> bool:
+    """True for empty replies or provider boilerplate (sign-up walls, rate limits, errors)."""
+    text = (answer or "").strip().lower()
+    if len(text) < 2:
+        return True
+    return len(text) < 300 and any(marker in text for marker in _PROVIDER_JUNK_MARKERS)
+
+
 def _ai_chat_g4f_go(system: str, user: str) -> str | None:
     """Query the local g4f-go OpenAI-compatible server."""
     if not G4F_GO_BASE_URL:
@@ -4121,6 +4137,10 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
         try:
             func = globals()[func_name]
             answer = func(system, user)
+            if answer and _looks_like_provider_junk(answer):
+                result["failures"][provider_name] = "provider returned boilerplate: " + answer[:80]
+                print(f"⚠️ AI provider {provider_name} returned boilerplate; trying next")
+                continue
             if answer:
                 result["answer"] = answer
                 result["provider"] = provider_name
