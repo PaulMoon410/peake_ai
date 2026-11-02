@@ -45,8 +45,35 @@ class G4fGoProviderTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 peakebot._ai_chat_g4f_go("sys", "hello")
 
-    def test_is_last_provider(self) -> None:
-        self.assertEqual("g4f-go", peakebot._AI_PROVIDERS[-1][0])
+    def test_g4f_routes_come_before_keyed_apis(self) -> None:
+        names = [name for name, _ in peakebot._AI_PROVIDERS]
+        self.assertEqual(["g4f-space", "g4f-go", "g4f"], names[:3])
+        self.assertLess(names.index("g4f"), names.index("openai"))
+
+    def test_g4f_space_rotates_models_until_one_answers(self) -> None:
+        bad = Mock(status_code=429)
+        junk = Mock(status_code=200)
+        junk.json.return_value = {"choices": [{"message": {"content": "Sign up and repeat your request."}}]}
+        good = Mock(status_code=200)
+        good.json.return_value = {"choices": [{"message": {"content": "<think>x</think> 391"}}]}
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(peakebot, "G4F_SPACE_API_KEY", "k"))
+            stack.enter_context(patch.object(peakebot, "G4F_SPACE_MODEL", "a,b,c"))
+            post = stack.enter_context(
+                patch.object(peakebot.requests, "post", side_effect=[bad, junk, good])
+            )
+            self.assertEqual("391", peakebot._ai_chat_g4f_space("sys", "hi"))
+        self.assertEqual(3, post.call_count)
+
+    def test_g4f_space_raises_when_all_models_fail(self) -> None:
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(peakebot, "G4F_SPACE_API_KEY", "k"))
+            stack.enter_context(patch.object(peakebot, "G4F_SPACE_MODEL", "a,b"))
+            stack.enter_context(
+                patch.object(peakebot.requests, "post", return_value=Mock(status_code=500))
+            )
+            with self.assertRaises(RuntimeError):
+                peakebot._ai_chat_g4f_space("sys", "hi")
 
     def test_g4f_space_disabled_without_key(self) -> None:
         with ExitStack() as stack:

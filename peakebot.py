@@ -78,7 +78,16 @@ G4F_GO_API_KEY = os.getenv("G4F_GO_API_KEY", "").strip()
 G4F_GO_MODEL = os.getenv("G4F_GO_MODEL", "auto").strip()
 G4F_SPACE_API_KEY = os.getenv("G4F_SPACE_API_KEY", "").strip()
 G4F_SPACE_BASE_URL = os.getenv("G4F_SPACE_BASE_URL", "https://g4f.space/v1").strip()
-G4F_SPACE_MODEL = os.getenv("G4F_SPACE_MODEL", "auto").strip()
+G4F_SPACE_MODEL = os.getenv(
+    "G4F_SPACE_MODEL",
+    "srv_mkombumpae45db46dcb8:nvidia/nemotron-3-ultra-550b-a55b,"
+    "srv_mrgy0nmbc8a86c407f17:models/gemini-3.5-flash-lite,"
+    "srv_mp5miql908c8738d71be:openai-fast,"
+    "srv_mrgykg8eea645e7bb006:gemma4:31b,"
+    "srv_mlv668eaa6d92f50ff10:gemini-3.8-flash,"
+    "srv_mkom688d57c76d8a3542:openai/gpt-oss-120b",
+).strip()
+G4F_SPACE_TIMEOUT = int(os.getenv("G4F_SPACE_TIMEOUT", "25"))
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free").strip()
 # Model IDs to try per provider. Keys without credit/access still rank first when
@@ -3627,7 +3636,10 @@ def _search_web_verified_answer(query: str) -> str | None:
 
 
 _AI_PROVIDERS = [
-    ("g4f", "_ai_chat_g4f"),  # Try g4f first
+    # All g4f routes first (free); keyed APIs only after every g4f route has failed.
+    ("g4f-space", "_ai_chat_g4f_space"),  # Hosted g4f.space (needs G4F_SPACE_API_KEY)
+    ("g4f-go", "_ai_chat_g4f_go"),  # Local g4f-go server
+    ("g4f", "_ai_chat_g4f"),  # Python g4f library
     ("openai", "_ai_chat_openai"),
     ("openrouter", "_ai_chat_openrouter"),
     ("anthropic", "_ai_chat_anthropic"),
@@ -3636,8 +3648,6 @@ _AI_PROVIDERS = [
     ("deepseek", "_ai_chat_deepseek"),
     ("mistral", "_ai_chat_mistral"),
     ("perplexity", "_ai_chat_perplexity"),
-    ("g4f-space", "_ai_chat_g4f_space"),  # Hosted g4f.space (needs G4F_SPACE_API_KEY)
-    ("g4f-go", "_ai_chat_g4f_go"),  # Final fallback: local g4f-go server
 ]
 
 # Providers preferred ahead of the default order. Set AI_PROVIDER_ORDER="groq,google"
@@ -4048,29 +4058,43 @@ def _ai_chat_openrouter(system: str, user: str) -> str | None:
 
 
 def _ai_chat_g4f_space(system: str, user: str) -> str | None:
-    """Query the hosted g4f.space OpenAI-compatible API (key from g4f.dev/api_key.html)."""
+    """Query hosted g4f.space, rotating through G4F_SPACE_MODEL (comma-separated) until one answers."""
     if not G4F_SPACE_API_KEY:
         return None
-    response = requests.post(
-        G4F_SPACE_BASE_URL.rstrip("/") + "/chat/completions",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + G4F_SPACE_API_KEY,
-        },
-        json={
-            "model": G4F_SPACE_MODEL,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": 0.7,
-        },
-        timeout=60,
-    )
-    if not 200 <= response.status_code < 300:
-        raise RuntimeError(f"g4f.space returned HTTP {response.status_code}")
-    answer = response.json()["choices"][0]["message"]["content"]
-    return answer.strip() if isinstance(answer, str) and answer.strip() else None
+    models = [m.strip() for m in G4F_SPACE_MODEL.split(",") if m.strip()] or ["auto"]
+    last_error = "no models configured"
+    for model in models:
+        try:
+            response = requests.post(
+                G4F_SPACE_BASE_URL.rstrip("/") + "/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer " + G4F_SPACE_API_KEY,
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": 0.7,
+                },
+                timeout=G4F_SPACE_TIMEOUT,
+            )
+            if not 200 <= response.status_code < 300:
+                last_error = f"{model} returned HTTP {response.status_code}"
+                continue
+            answer = response.json()["choices"][0]["message"]["content"]
+        except Exception as exc:
+            last_error = f"{model}: {type(exc).__name__}"
+            continue
+        if not isinstance(answer, str):
+            continue
+        answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL).strip()
+        if answer and not _looks_like_provider_junk(answer):
+            return answer
+        last_error = f"{model} returned empty or boilerplate reply"
+    raise RuntimeError(f"g4f.space: all models failed ({last_error})")
 
 
 _PROVIDER_JUNK_MARKERS = (
