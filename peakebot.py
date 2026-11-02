@@ -73,6 +73,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "").strip()
+G4F_GO_BASE_URL = os.getenv("G4F_GO_BASE_URL", "").strip()
+G4F_GO_API_KEY = os.getenv("G4F_GO_API_KEY", "").strip()
+G4F_GO_MODEL = os.getenv("G4F_GO_MODEL", "auto").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free").strip()
 # Model IDs to try per provider. Keys without credit/access still rank first when
@@ -3617,6 +3620,7 @@ _AI_PROVIDERS = [
     ("deepseek", "_ai_chat_deepseek"),
     ("mistral", "_ai_chat_mistral"),
     ("perplexity", "_ai_chat_perplexity"),
+    ("g4f-go", "_ai_chat_g4f_go"),  # Final fallback: local g4f-go server
 ]
 
 # Providers preferred ahead of the default order. Set AI_PROVIDER_ORDER="groq,google"
@@ -4026,6 +4030,35 @@ def _ai_chat_openrouter(system: str, user: str) -> str | None:
         return None
 
 
+def _ai_chat_g4f_go(system: str, user: str) -> str | None:
+    """Query the local g4f-go OpenAI-compatible server."""
+    if not G4F_GO_BASE_URL:
+        return None
+    endpoint = G4F_GO_BASE_URL.rstrip("/")
+    if not endpoint.endswith("/v1/chat/completions"):
+        endpoint += "/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if G4F_GO_API_KEY:
+        headers["Authorization"] = "Bearer " + G4F_GO_API_KEY
+    response = requests.post(
+        endpoint,
+        headers=headers,
+        json={
+            "model": G4F_GO_MODEL,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.7,
+        },
+        timeout=60,
+    )
+    if not 200 <= response.status_code < 300:
+        raise RuntimeError(f"g4f-go returned HTTP {response.status_code}")
+    answer = response.json()["choices"][0]["message"]["content"]
+    return answer.strip() if isinstance(answer, str) and answer.strip() else None
+
+
 def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]:
     """Try AI providers in order: OpenAI first, then fallbacks.
 
@@ -4066,7 +4099,11 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
             "mistral": MISTRAL_API_KEY,
             "perplexity": PERPLEXITY_API_KEY,
         }.get(provider_name, "")
-        if provider_name != "g4f" and not key_var:
+        if provider_name == "g4f-go":
+            if not G4F_GO_BASE_URL:
+                result["failures"][provider_name] = "G4F_GO_BASE_URL not configured"
+                continue
+        elif provider_name != "g4f" and not key_var:
             result["failures"][provider_name] = "no API key configured"
             print(f"⚠️ AI provider {provider_name} skipped: no API key configured")
             continue
