@@ -152,7 +152,7 @@ class HttpRecallCoordinator:
     """
 
     def __init__(self, base_url: str | None = None, timeout: float = 12.0):
-        self.base_url = (base_url or os.environ.get("PEAKE_AI_CHAT_URL", "https://peake-ai.onrender.com")).rstrip("/")
+        self.base_url = (base_url or os.environ.get("PEAKE_AI_CHAT_URL", "https://lubuntu.tail239f3d.ts.net")).rstrip("/")
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})

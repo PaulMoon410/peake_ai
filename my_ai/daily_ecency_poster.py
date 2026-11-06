@@ -142,7 +142,7 @@ def build_daily_post_body(store) -> str:
     sections.append("## 🌐 Where to Find Me")
     sections.append("")
     sections.append(
-        "- **Chat:** https://peake-ai.onrender.com/ — talk to Harold directly\n"
+        "- **Chat:** https://lubuntu.tail239f3d.ts.net/ — talk to Harold directly\n"
         "- **Ecency/PeakD/Hive.blog:** This post is syndicated across all Hive frontends\n"
         "- **FTP Archive:** Notes are archived to GeoCities-style FTP storage\n"
     )

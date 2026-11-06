@@ -1,11 +1,11 @@
-# Keep repository focused on PeakeBot top-level files only.
+# Keep repository focused on PeakeBot files and the VS Code coding assistant.
 # Ignore everything by default.
 /*
 
 # Keep this file tracked.
 !.gitignore
 
-# Allow only top-level PeakeBot files (no directories).
+# Allow selected PeakeBot files and the coding extension.
 !autonomous_ai.py
 !base_knowledge_overrides.json
 !DEPLOYMENT_COMPLETE.md
@@ -31,7 +31,7 @@
 !validate_admin_setup.py
 !web_app.py
 
-# Never include directories from this workspace.
+# Allow only explicitly listed my_ai and extension paths below.
 !my_ai/memory_store.py
 !my_ai/math_learner.py
 !my_ai/conversation.py
@@ -50,6 +50,14 @@ my_ai/harold/*
 my_ai/tests/*
 !my_ai/tests/*.py
 !intent_learner.py
+!vscode-extension/
+vscode-extension/*
+!vscode-extension/package.json
+!vscode-extension/extension.js
+!vscode-extension/README.md
+!vscode-extension/.vscode/
+vscode-extension/.vscode/*
+!vscode-extension/.vscode/launch.json
 
 # Runtime/cache artifacts
 self_talk_dialogue.json

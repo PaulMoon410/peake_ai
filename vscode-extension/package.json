@@ -1,0 +1,32 @@
+{
+  "name": "grammar-logic-checker",
+  "displayName": "Grammar & Logic Checker",
+  "description": "Check code for grammar and logical correctness with minimal API calls.",
+  "version": "0.1.0",
+  "publisher": "paulmoon410",
+  "engines": { "vscode": "^1.85.0" },
+  "extensionKind": ["workspace"],
+  "categories": ["Other"],
+  "activationEvents": ["onCommand:harold.startCoding", "onCommand:harold.setApiKey", "onCommand:harold.clearApiKey"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "grammarLogicChecker.start", "title": "Grammar & Logic: Check Code" },
+      { "command": "grammarLogicChecker.setApiKey", "title": "Grammar & Logic: Set API Key" },
+      { "command": "grammarLogicChecker.clearApiKey", "title": "Grammar & Logic: Clear API Key" }
+    ],
+    "configuration": {
+      "title": "Grammar & Logic Checker",
+      "properties": {
+        "grammarLogicChecker.apiBaseUrl": {
+          "type": "string",
+          "default": "https://lubuntu.tail239f3d.ts.net/v1",
+          "description": "API base URL for grammar and logic checking."
+        },
+        "grammarLogicChecker.model": { "type": "string", "default": "harold", "description": "API model name for grammar and logic checking." },
+        "grammarLogicChecker.temperature": { "type": "number", "default": 0.2, "description": "Controls randomness in responses (0.0 to 1.0, lower is more precise)" },
+        "grammarLogicChecker.max_tokens": { "type": "number", "default": 2000, "description": "Maximum number of tokens in the API response" }
+      }
+    }
+  }
+}

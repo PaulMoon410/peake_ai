@@ -8,7 +8,11 @@ import ftplib
 from collections import defaultdict, deque
 from typing import Optional, Tuple
 from datetime import datetime, timedelta
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, send_from_directory
+from werkzeug.utils import secure_filename
+from PIL import Image, ImageFilter, ImageEnhance, ImageOps
+import tool_events
+import agent_tools
 from my_ai.conversation import normalize_history
 
 # Load .env if present (no external dependency).
@@ -22,6 +26,7 @@ if os.path.isfile(_env_path):
         os.environ.setdefault(_k.strip(), _v.strip())
 
 from peakebot import (
+  _query_ai_providers_for_self_talk,
   _get_mcf_memory_store,
   _ftp_connect_for_upload,
   _ftp_store_binary,
@@ -45,6 +50,7 @@ from peakebot import (
 from my_ai.integrations.integration_manager import IntegrationManager
 from my_ai.memory_organizer import sync_and_organize, HttpRecallCoordinator
 from my_ai.daily_ecency_poster import start_daily_poster, post_daily_update
+from my_ai import harold_waves
 
 
 app = Flask(__name__)
@@ -167,12 +173,24 @@ def _start_daily_ecency_poster() -> None:
   start_daily_poster(store_getter=_get_mcf_store_for_poster)
 
 
+def _wave_text(prompt: str) -> str:
+  import peakebot
+  reply = peakebot._ai_chat_completion(prompt, "")
+  return str((reply or {}).get("answer") or "")
+
+
+def _start_harold_waves() -> None:
+  """Start the once-a-day Hive Wave poster (no-op until Hive credentials exist)."""
+  harold_waves.start_waves_poster(generate=_wave_text)
+
+
 @app.before_request
 def _kickoff_ftp_startup_check() -> None:
   # Gunicorn has bound the listener; keep readiness requests fast during warm-up.
   _start_ftp_startup_sync()
   _start_model_warmup()
   _start_daily_ecency_poster()
+  _start_harold_waves()
   _start_keepalive_learning()
 
   if request.path != "/health":
@@ -299,168 +317,784 @@ def health_check() -> Response:
 
 @app.get("/")
 def index() -> Response:
-    html = """<!doctype html>
-<html>
+    html = r"""<!doctype html>
+<html lang="en">
 <head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>Harold Web</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Harold AI · Terminal</title>
   <style>
     :root {
-      --bg: #0f172a;
-      --panel: #111827;
-      --text: #e5e7eb;
-      --muted: #9ca3af;
-      --accent: #22c55e;
+      --bg: #090d16;
+      --surface: #0f172a;
+      --surface-card: #141e33;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-focus: #3b82f6;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --accent: #10b981;
+      --accent-glow: rgba(16, 185, 129, 0.2);
+      --user-bubble: #1e293b;
+      --bot-bubble: #111a2e;
+      --warn: #f59e0b;
       --error: #ef4444;
+      --purple: #a855f7;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;
-      background: radial-gradient(circle at top, #1f2937, var(--bg));
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      background: var(--bg);
       color: var(--text);
-      min-height: 100vh;
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    body {
       display: flex;
-      align-items: center;
       justify-content: center;
-      padding: 16px;
-    }
-    .shell {
-      width: min(900px, 100%);
-      background: #0b1220;
-      border: 1px solid #1f2937;
-      border-radius: 14px;
-      overflow: hidden;
-      box-shadow: 0 24px 60px rgba(0,0,0,.45);
-    }
-    .bar {
-      background: #0b1020;
-      border-bottom: 1px solid #1f2937;
-      padding: 10px 14px;
-      display: flex;
-      gap: 10px;
       align-items: center;
-    }
-    .dot { width: 10px; height: 10px; border-radius: 999px; }
-    .d1 { background: #ef4444; }
-    .d2 { background: #f59e0b; }
-    .d3 { background: #22c55e; }
-    .title { color: var(--muted); font-size: 13px; margin-left: 6px; }
-    #log {
-      height: 60vh;
-      overflow: auto;
-      padding: 14px;
-      white-space: pre-wrap;
-      line-height: 1.45;
-      background: linear-gradient(180deg, #0b1220 0%, #0a1020 100%);
-    }
-    .u { color: #93c5fd; }
-    .b { color: #86efac; }
-    .e { color: var(--error); }
-    .st { color: #c4b5fd; opacity: .92; }
-    .st-critic { color: #fbbf24; opacity: .92; font-style: italic; }
-    .st-topic { color: var(--muted); border-top: 1px dashed #374151; padding-top: 6px; margin-top: 6px; }
-    .input {
-      display: grid;
-      grid-template-columns: 1fr auto auto;
-      gap: 10px;
-      border-top: 1px solid #1f2937;
       padding: 12px;
-      background: #0b1020;
+    }
+    .app-container {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      max-width: 960px;
+      height: 94vh;
+      max-height: 900px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5), 0 1px 0 rgba(255, 255, 255, 0.05) inset;
+      overflow: hidden;
+      position: relative;
+    }
+    /* Top Bar */
+    .top-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 18px;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+      z-index: 10;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 10px var(--accent);
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+    .status-dot.busy {
+      background: var(--warn);
+      box-shadow: 0 0 10px var(--warn);
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .brand-title {
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .brand-subtitle {
+      color: var(--text-dim);
+      font-size: 12px;
+      font-family: var(--mono);
+      margin-left: 2px;
+    }
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn-ghost {
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 5px 11px;
+      font-size: 12px;
+      font-family: var(--sans);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .btn-ghost:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+    .btn-ghost.active {
+      background: rgba(168, 85, 247, 0.15);
+      border-color: rgba(168, 85, 247, 0.4);
+      color: #d8b4fe;
+    }
+    /* Main Area with Drawer */
+    .main-body {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      position: relative;
+      overflow: hidden;
+    }
+    /* Chat stream */
+    .chat-view {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      overflow: hidden;
+    }
+    #log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 20px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      scroll-behavior: smooth;
+    }
+    #log::-webkit-scrollbar { width: 6px; }
+    #log::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 4px; }
+    /* Message Bubbles */
+    .msg-row {
+      display: flex;
+      flex-direction: column;
+      max-width: 86%;
+      animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .msg-row.user {
+      align-self: flex-end;
+    }
+    .msg-row.bot {
+      align-self: flex-start;
+    }
+    .msg-author {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-dim);
+      margin-bottom: 4px;
+      padding: 0 4px;
+    }
+    .msg-row.user .msg-author {
+      align-self: flex-end;
+      color: #93c5fd;
+    }
+    .msg-row.bot .msg-author {
+      color: #6ee7b7;
+    }
+    .msg-bubble {
+      padding: 12px 16px;
+      border-radius: 12px;
+      word-break: break-word;
+      line-height: 1.55;
+      font-size: 13.5px;
+      white-space: pre-wrap;
+    }
+    .msg-row.user .msg-bubble {
+      background: var(--user-bubble);
+      color: #f8fafc;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-bottom-right-radius: 4px;
+    }
+    .msg-row.bot .msg-bubble {
+      background: var(--bot-bubble);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+    .msg-row.error .msg-bubble {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      color: #fca5a5;
+    }
+    /* Tool Events */
+    .tool-card {
+      align-self: flex-start;
+      margin: -4px 0 2px 2px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      max-width: 90%;
+    }
+    .tool-card summary {
+      padding: 6px 10px;
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-muted);
+      user-select: none;
+    }
+    .tool-card summary::-webkit-details-marker { display: none; }
+    .tool-card summary:hover {
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text);
+    }
+    .tool-card .status-icon {
+      font-weight: bold;
+    }
+    .tool-card .status-icon.ok { color: var(--accent); }
+    .tool-card .status-icon.err { color: var(--error); }
+    .tool-card pre {
+      padding: 8px 10px;
+      background: rgba(0, 0, 0, 0.3);
+      color: var(--text-dim);
+      font-size: 11px;
+      border-top: 1px solid var(--border);
+      white-space: pre-wrap;
+      max-height: 140px;
+      overflow-y: auto;
+    }
+    /* Warning Banner */
+    #startup-warning {
+      display: none;
+      padding: 8px 16px;
+      background: rgba(245, 158, 11, 0.12);
+      border-bottom: 1px solid rgba(245, 158, 11, 0.2);
+      color: #fbbf24;
+      font-size: 12px;
+      align-items: center;
+      gap: 8px;
+    }
+    /* Side Panel / Self-talk */
+    #selftalkPanel {
+      width: 320px;
+      background: #090e1a;
+      border-left: 1px solid var(--border);
+      display: none;
+      flex-direction: column;
+      animation: slideIn 0.2s ease-out;
+    }
+    @keyframes slideIn {
+      from { transform: translateX(20px); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+    .st-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      font-weight: 600;
+      color: #d8b4fe;
+    }
+    #selftalkLog {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .st-turn {
+      padding: 8px 10px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+    }
+    .st-turn.critic {
+      border-color: rgba(251, 191, 36, 0.2);
+      color: #fde68a;
+      font-style: italic;
+    }
+    .st-turn.learner {
+      color: #c4b5fd;
+    }
+    .st-turn.instructor {
+      color: #93c5fd;
+    }
+    .st-topic-tag {
+      font-size: 11px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin: 6px 0 2px;
+      text-align: center;
+    }
+    /* Bottom Input Section */
+    .bottom-section {
+      border-top: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.7);
+      padding: 12px 16px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .input-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    .textarea-wrapper {
+      flex: 1;
+      position: relative;
     }
     textarea {
       width: 100%;
-      resize: vertical;
-      min-height: 52px;
-      max-height: 180px;
-      background: #111827;
+      min-height: 44px;
+      max-height: 160px;
+      background: #090e1a;
       color: var(--text);
-      border: 1px solid #374151;
-      border-radius: 8px;
-      padding: 10px;
-      font: inherit;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 11px 14px;
+      font-family: inherit;
+      font-size: 13.5px;
+      line-height: 1.45;
+      resize: none;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
     }
-    button {
-      border: 0;
-      background: var(--accent);
-      color: #052e16;
-      font-weight: 700;
-      border-radius: 8px;
+    textarea:focus {
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+    }
+    .action-btn {
+      height: 44px;
       padding: 0 16px;
+      border-radius: 10px;
+      border: 0;
+      font-size: 13px;
+      font-weight: 600;
       cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all 0.15s;
+      user-select: none;
     }
-    #steer { background: #f59e0b; color: #451a03; }
-    button:disabled { opacity: .6; cursor: not-allowed; }
-    .hint {
-      color: var(--muted);
-      font-size: 12px;
-      padding: 0 12px 12px;
+    .btn-send {
+      background: var(--accent);
+      color: #022c22;
     }
-    #queue-status { color: var(--muted); font-size: 12px; padding: 0 12px 10px; }
+    .btn-send:hover {
+      background: #059669;
+      box-shadow: 0 2px 10px var(--accent-glow);
+    }
+    .btn-steer {
+      background: rgba(245, 158, 11, 0.15);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      color: #fde68a;
+      padding: 0 12px;
+    }
+    .btn-steer:hover {
+      background: rgba(245, 158, 11, 0.25);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      box-shadow: none !important;
+    }
+    .footer-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11.5px;
+      color: var(--text-dim);
+      padding: 0 2px;
+    }
+    .footer-hints code {
+      font-family: var(--mono);
+      background: rgba(255, 255, 255, 0.05);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    #queue-status {
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+    #queue-status.busy {
+      color: var(--warn);
+    }
+    @media (max-width: 640px) {
+      body { padding: 0; }
+      .app-container { height: 100vh; max-height: none; border-radius: 0; border: 0; }
+      #selftalkPanel { position: absolute; right: 0; top: 0; bottom: 0; width: 85%; z-index: 20; box-shadow: -10px 0 30px rgba(0,0,0,0.5); }
+      .btn-steer span { display: none; }
+    }
+
+    /* Code blocks */
+    .code-wrap { position: relative; margin: 12px 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: #090e1a; }
+    .code-wrap pre { margin: 0; padding: 14px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+    .code-wrap code { font-family: var(--mono); color: #e2e8f0; }
+    .code-copy { position: absolute; top: 8px; right: 8px; background: #1e293b; border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+    .code-copy:hover { background: #334155; }
+
+    /* Images */
+    .msg-image-wrap { margin: 12px 0; text-align: center; }
+    .msg-image { max-width: 100%; max-height: 400px; border-radius: 10px; border: 1px solid var(--border); cursor: pointer; }
+    .msg-image:hover { filter: brightness(1.1); }
+    .msg-image-cap { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+
+    /* Videos */
+    .msg-video-wrap { margin: 12px 0; text-align: center; }
+    .msg-video-cap { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+
+    /* Audio */
+    .msg-audio-wrap { margin: 12px 0; }
+    .msg-audio-cap { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+
+    /* Image upload button */
+    .img-upload-btn { background: #1e293b; border: 1px solid var(--border); color: var(--text); padding: 0 12px; border-radius: 8px; font-size: 13px; cursor: pointer; margin-left: 8px; }
+    .img-upload-btn:hover { background: #334155; }
+    #imgInput { display: none; }
+
+    /* Image action buttons */
+    .img-actions { display: flex; gap: 6px; justify-content: center; margin-top: 6px; flex-wrap: wrap; }
+    .img-btn { background: #1e293b; border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; }
+    .img-btn:hover { background: #334155; }
+    .img-btn.primary { background: var(--accent); border-color: var(--accent); color: #000; }
+    .img-btn.primary:hover { background: #4ade80; }
+
+    /* Image edit modal */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 1000; display: none; align-items: center; justify-content: center; padding: 20px; }
+    .modal-overlay.open { display: flex; }
+    .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: min(90vw, 800px); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+    .modal-title { font-weight: 600; font-size: 15px; }
+    .modal-close { background: transparent; border: none; color: var(--text); font-size: 20px; cursor: pointer; }
+    .modal-body { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; align-items: center; }
+    .modal-image { max-width: 100%; max-height: 50vh; border-radius: 8px; border: 1px solid var(--border); }
+    .modal-controls { padding: 14px 16px; border-top: 1px solid var(--border); background: #0b1220; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .ctrl-group { display: flex; flex-direction: column; gap: 6px; }
+    .ctrl-label { font-size: 11px; color: var(--text-dim); }
+    .ctrl-row { display: flex; gap: 8px; align-items: center; }
+    input[type=range] { width: 140px; }
+    input[type=number] { width: 60px; background: #090e1a; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font-size: 12px; }
+
   </style>
 </head>
 <body>
-  <div class=\"shell\">
-    <div class=\"bar\">
-      <span class=\"dot d1\"></span>
-      <span class=\"dot d2\"></span>
-      <span class=\"dot d3\"></span>
-      <span class=\"title\">Harold Public Terminal</span>
-    </div>
-    <div id=\"startup-warning\" style=\"padding:10px 14px; background:#f59e0b; color:#451a03; font-size:13px; border-bottom:1px solid #1f2937; display:none;\">
-      ⚠️ Harold is starting up. The first message may take 30–90 seconds while the AI model warms up — please wait, don’t close the page.
-    </div>
-    <div id=\"log\"></div>
-    <div class=\"input\">
-      <textarea id=\"prompt\" placeholder=\"Type your message...\"></textarea>
-      <button id=\"send\">Send</button>
-      <button id=\"steer\" title=\"Prioritize this instruction after the current reply\">Steer next</button>
-    </div>
-    <div id=\"queue-status\" aria-live=\"polite\">Ready.</div>
-    <div class=\"hint\">Messages are sent in order. “Steer next” prioritizes guidance after Harold's current reply; it cannot change text already being generated. Avoid sensitive data.<br />
-    <code>/selftalk [topic]</code> starts the continuous self-study conversation (shown below in purple); <code>/selftalk off</code>, <code>/selftalk status</code>, <code>/selftalk clear</code> control it.</div>
+  <div class="app-container">
+    <!-- Top Nav -->
+    <header class="top-bar">
+      <div class="brand">
+        <span class="status-dot" id="statusDot"></span>
+        <div>
+          <span class="brand-title">Harold</span>
+          <span class="brand-subtitle">v1</span>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button class="btn-ghost" id="clearBtn" title="Clear chat view">Clear</button>
+        <button class="btn-ghost" id="selftalkToggle" title="Toggle Harold Self-Talk">Self-Talk</button>
+      </div>
+    </header>
 
-    <div id=\"code-panel\" style=\"border-top:1px solid #1f2937; padding:12px; background:#0b1020; display:none;\">
-      <div style=\"margin-bottom:8px; font-weight:700; color:#22c55e;\">Code Generator</div>
-      <div style=\"margin-bottom:8px;\">
-        <textarea id=\"codePrompt\" placeholder=\"e.g. write a python script to scrape a website...\"></textarea>
-      </div>
-      <div style=\"margin-bottom:8px; gap:8px; display:flex; align-items:center;\">
-        <button id=\"codeGenBtn\">Generate & Upload to FTP</button>
-        <button id=\"codeListBtn\">List FTP Files</button>
-        <span id=\"codeStatus\" style=\"font-size:12px; color:#9ca3af; margin-left:8px;\"></span>
-      </div>
-      <pre id=\"codeOutput\" style=\"background:#111827; border:1px solid #374151; border-radius:8px; padding:10px; font-size:13px; max-height:300px; overflow:auto;\"></pre>
-      <div id=\"codeDownloads\" style=\"margin-top:8px;\"></div>
+    <div id="startup-warning">
+      <span>⏳</span> Harold is warming up internal models. First response can take 30–60 seconds...
+    </div>
+
+    <!-- Main Workspace -->
+    <div class="main-body">
+      <!-- Main Chat Area -->
+      <section class="chat-view">
+        <div id="log"></div>
+
+        <!-- Input Bar -->
+        <footer class="bottom-section">
+          <div class="input-row">
+            <div class="textarea-wrapper">
+              <textarea id="prompt" placeholder="Message Harold... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+            </div>
+            <button class="action-btn btn-steer" id="steer" title="Prioritize guidance next">Steer</button>
+            <button class="action-btn btn-send" id="send">Send</button>
+            <button class="action-btn img-upload-btn" id="imgUploadBtn" title="Upload image">📷</button>
+            <input type="file" id="imgInput" accept="image/*" />
+          </div>
+          <div class="footer-bar">
+            <span id="queue-status">Ready</span>
+            <div class="footer-hints">
+              Try <code>/selftalk</code> · <code>/status</code>
+            </div>
+          </div>
+        </footer>
+      </section>
+
+      <!-- Self-Talk Drawer -->
+      <aside id="selftalkPanel">
+        <div class="st-bar">
+          <span>Continuous Self-Talk</span>
+          <button class="btn-ghost" id="closeStBtn" style="padding: 2px 7px; font-size: 11px;">✕</button>
+        </div>
+        <div id="selftalkLog"></div>
+      </aside>
     </div>
   </div>
+
   <script>
     const log = document.getElementById('log');
     const promptEl = document.getElementById('prompt');
     const sendBtn = document.getElementById('send');
     const steerBtn = document.getElementById('steer');
     const queueStatus = document.getElementById('queue-status');
+    const statusDot = document.getElementById('statusDot');
     const startupWarning = document.getElementById('startup-warning');
+    const selftalkPanel = document.getElementById('selftalkPanel');
+    const selftalkToggle = document.getElementById('selftalkToggle');
+    const closeStBtn = document.getElementById('closeStBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const selftalkLog = document.getElementById('selftalkLog');
+
     const conversationHistory = [];
     const messageQueue = [];
     const MAX_QUEUED_MESSAGES = 20;
     let processingQueue = false;
-    let activeStatus = '';
 
-    function addLine(cls, text) {
-      const line = document.createElement('div');
-      line.className = cls;
-      line.textContent = text;
-      log.appendChild(line);
+    // Auto-resizing textarea
+    promptEl.addEventListener('input', () => {
+      promptEl.style.height = 'auto';
+      promptEl.style.height = Math.min(promptEl.scrollHeight, 160) + 'px';
+    });
+
+    function addMessage(role, text) {
+      const row = document.createElement('div');
+      row.className = 'msg-row ' + role;
+
+      const author = document.createElement('div');
+      author.className = 'msg-author';
+      author.textContent = role === 'user' ? 'You' : (role === 'error' ? 'System' : 'Harold');
+
+      const bubble = document.createElement('div');
+      bubble.className = 'msg-bubble';
+
+      // Parse code blocks ```lang ... ``` and images ![alt](url)
+      const parts = [];
+      let remaining = text;
+      const codeBlockRe = /```(\w*)\n([\s\S]*?)```/g;
+      const imageRe = /!\[([^\]]*)\]\(([^)]+)\)/g;
+
+      let lastIdx = 0;
+      let m;
+      const tokens = [];
+
+      // Find all code blocks and image/video/audio tags
+      let events = [];
+      let re;
+      re = /```(\w*)\n([\s\S]*?)```/g;
+      while ((m = re.exec(text))) {
+        events.push({ type: 'code', start: m.index, end: re.lastIndex, lang: m[1] || 'text', code: m[2] });
+      }
+      re = /!\[([^\]]*)\]\(([^)]+)\)/g;
+      while ((m = re.exec(text))) {
+        const url = m[2];
+        const lower = url.toLowerCase();
+        let mediaType = 'image';
+        if (lower.match(/\.(gif|mp4|webm|avi)(\?.*)?$/)) mediaType = 'video';
+        else if (lower.match(/\.(wav|mp3|ogg|flac)(\?.*)?$/)) mediaType = 'audio';
+        events.push({ type: mediaType, start: m.index, end: re.lastIndex, alt: m[1], url: url });
+      }
+      events.sort((a, b) => a.start - b.start);
+
+      let cursor = 0;
+      for (const ev of events) {
+        if (ev.start > cursor) {
+          const txt = document.createTextNode(text.slice(cursor, ev.start));
+          tokens.push({ type: 'text', node: txt });
+        }
+        if (ev.type === 'code') {
+          tokens.push({ type: 'code', lang: ev.lang, code: ev.code });
+        } else if (ev.type === 'image') {
+          tokens.push({ type: 'image', alt: ev.alt, url: ev.url });
+        }
+        cursor = ev.end;
+      }
+      if (cursor < text.length) {
+        tokens.push({ type: 'text', node: document.createTextNode(text.slice(cursor)) });
+      }
+
+      for (const t of tokens) {
+        if (t.type === 'text') {
+          bubble.appendChild(t.node);
+        } else if (t.type === 'code') {
+          const pre = document.createElement('pre');
+          pre.className = 'code-block';
+          const code = document.createElement('code');
+          code.className = 'lang-' + t.lang;
+          code.textContent = t.code;
+          pre.appendChild(code);
+
+          const copy = document.createElement('button');
+          copy.className = 'code-copy';
+          copy.textContent = 'Copy';
+          copy.onclick = () => {
+            navigator.clipboard.writeText(t.code);
+            copy.textContent = 'Copied!';
+            setTimeout(() => copy.textContent = 'Copy', 1500);
+          };
+
+          const wrap = document.createElement('div');
+          wrap.className = 'code-wrap';
+          wrap.appendChild(pre);
+          wrap.appendChild(copy);
+          bubble.appendChild(wrap);
+        } else if (t.type === 'video') {
+          const vidWrap = document.createElement('div');
+          vidWrap.className = 'msg-video-wrap';
+          const vid = document.createElement('video');
+          vid.src = t.url.startsWith('http') ? t.url : (t.url.startsWith('/') ? t.url : '/' + t.url);
+          vid.alt = t.alt || 'video';
+          vid.className = 'msg-video';
+          vid.controls = true;
+          vid.autoplay = true;
+          vid.muted = true;
+          vid.style.maxWidth = '100%';
+          vid.style.maxHeight = '400px';
+          vid.style.borderRadius = '10px';
+          vid.style.border = '1px solid var(--border)';
+          vidWrap.appendChild(vid);
+
+          const actions = document.createElement('div');
+          actions.className = 'img-actions';
+
+          const dlBtn = document.createElement('button');
+          dlBtn.className = 'img-btn';
+          dlBtn.textContent = 'Download';
+          dlBtn.onclick = () => {
+            const a = document.createElement('a');
+            a.href = vid.src;
+            a.download = t.alt || 'video.gif';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+          };
+          actions.appendChild(dlBtn);
+
+          vidWrap.appendChild(actions);
+
+          const cap = document.createElement('div');
+          cap.className = 'msg-video-cap';
+          cap.textContent = t.alt || 'Video';
+          vidWrap.appendChild(cap);
+          bubble.appendChild(vidWrap);
+        } else if (t.type === 'audio') {
+          const audWrap = document.createElement('div');
+          audWrap.className = 'msg-audio-wrap';
+          const aud = document.createElement('audio');
+          aud.src = t.url.startsWith('http') ? t.url : (t.url.startsWith('/') ? t.url : '/' + t.url);
+          aud.controls = true;
+          aud.autoplay = true;
+          aud.muted = false;
+          aud.style.width = '100%';
+          audWrap.appendChild(aud);
+
+          const actions = document.createElement('div');
+          actions.className = 'img-actions';
+
+          const dlBtn = document.createElement('button');
+          dlBtn.className = 'img-btn';
+          dlBtn.textContent = 'Download';
+          dlBtn.onclick = () => {
+            const a = document.createElement('a');
+            a.href = aud.src;
+            a.download = t.alt || 'audio.wav';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+          };
+          actions.appendChild(dlBtn);
+
+          audWrap.appendChild(actions);
+
+          const cap = document.createElement('div');
+          cap.className = 'msg-audio-cap';
+          cap.textContent = t.alt || 'Audio';
+          audWrap.appendChild(cap);
+          bubble.appendChild(audWrap);
+        } else if (t.type === 'image') {
+      }
+
+      row.appendChild(author);
+      row.appendChild(bubble);
+      log.appendChild(row);
       log.scrollTop = log.scrollHeight;
     }
 
-    // -- continuous self-talk: tail the shared conversation ------------------
+    function addToolLine(ev) {
+      const card = document.createElement('details');
+      card.className = 'tool-card';
+      const head = document.createElement('summary');
+      const ok = ev.status === 'ok';
+
+      const icon = document.createElement('span');
+      icon.className = 'status-icon ' + (ok ? 'ok' : 'err');
+      icon.textContent = ok ? '✓' : '✗';
+      head.appendChild(icon);
+
+      const ms = typeof ev.duration_ms === 'number' ? ` (${ev.duration_ms}ms)` : '';
+      head.appendChild(document.createTextNode(' Tool: ' + (ev.label || ev.name) + ms));
+      card.appendChild(head);
+
+      const pre = document.createElement('pre');
+      const args = Object.entries(ev.args || {}).map(([k, v]) => `${k}: ${v}`).join('\n');
+      pre.textContent = (args ? args + '\n' : '') + (ev.summary ? '→ ' + ev.summary : '');
+      card.appendChild(pre);
+
+      log.appendChild(card);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    // Self-talk drawer
+    function toggleSelfTalkPanel() {
+      const show = selftalkPanel.style.display !== 'flex';
+      selftalkPanel.style.display = show ? 'flex' : 'none';
+      selftalkToggle.classList.toggle('active', show);
+    }
+    selftalkToggle.addEventListener('click', toggleSelfTalkPanel);
+    closeStBtn.addEventListener('click', () => {
+      selftalkPanel.style.display = 'none';
+      selftalkToggle.classList.remove('active');
+    });
+
+    clearBtn.addEventListener('click', () => {
+      log.innerHTML = '';
+      addMessage('bot', 'Conversation cleared. Ready for your query.');
+    });
+
     const SELF_TALK_POLL_MS = 4000;
     let selfTalkIndex = 0;
     let selfTalkTimer = null;
     let selfTalkTopic = '';
+
+    function addSelftalkLine(cls, text) {
+      const turn = document.createElement('div');
+      turn.className = 'st-turn ' + cls;
+      turn.textContent = text;
+      selftalkLog.appendChild(turn);
+      selftalkLog.scrollTop = selftalkLog.scrollHeight;
+    }
 
     function renderSelfTalkTurn(turn) {
       const role = turn.role || '?';
@@ -469,11 +1103,14 @@ def index() -> Response:
       const topic = turn.topic || '';
       if (topic && topic !== selfTalkTopic) {
         selfTalkTopic = topic;
-        addLine('st-topic', `— self-talk topic: ${topic} —`);
+        const tag = document.createElement('div');
+        tag.className = 'st-topic-tag';
+        tag.textContent = 'Topic: ' + topic;
+        selftalkLog.appendChild(tag);
       }
-      const checked = (turn.agreement > 1) ? ` [${turn.agreement} models agree]` : '';
+      const checked = (turn.agreement > 1) ? ` [${turn.agreement} agreed]` : '';
       const via = turn.provider && role !== 'critic' ? ` (${turn.provider})` : '';
-      addLine(role === 'critic' ? 'st-critic' : 'st', `${label}${via}${checked}: ${turn.text}`);
+      addSelftalkLine(role, `${label}${via}${checked}: ${turn.text}`);
     }
 
     async function pollSelfTalk() {
@@ -483,9 +1120,7 @@ def index() -> Response:
         const data = await res.json();
         for (const turn of (data.turns || [])) renderSelfTalkTurn(turn);
         if (typeof data.next === 'number') selfTalkIndex = data.next;
-      } catch (_err) {
-        // Network hiccup: keep the timer alive, the next poll catches up.
-      }
+      } catch (_err) {}
     }
 
     function startSelfTalkPolling() {
@@ -495,12 +1130,15 @@ def index() -> Response:
     }
 
     function updateQueueStatus(activeText = null) {
-      if (activeText !== null) activeStatus = activeText;
       const pending = messageQueue.length;
       if (processingQueue) {
-        queueStatus.textContent = activeStatus + (pending ? ` · ${pending} queued` : '');
+        statusDot.className = 'status-dot busy';
+        queueStatus.className = 'busy';
+        queueStatus.textContent = activeText || (pending ? `Generating (${pending} queued)` : 'Generating...');
       } else {
-        queueStatus.textContent = pending ? `${pending} queued` : 'Ready.';
+        statusDot.className = 'status-dot';
+        queueStatus.className = '';
+        queueStatus.textContent = pending ? `${pending} queued` : 'Ready';
       }
     }
 
@@ -508,17 +1146,19 @@ def index() -> Response:
       const prompt = promptEl.value.trim();
       if (!prompt) return;
       if (messageQueue.length >= MAX_QUEUED_MESSAGES) {
-        addLine('e', `Queue is full (maximum ${MAX_QUEUED_MESSAGES} waiting messages).`);
+        addMessage('error', `Queue is full (max ${MAX_QUEUED_MESSAGES} messages).`);
         return;
       }
       promptEl.value = '';
+      promptEl.style.height = 'auto';
+
       const item = {prompt, steer};
       if (steer) {
         messageQueue.unshift(item);
-        addLine('u', 'You (steering next): ' + prompt);
+        addMessage('user', '⚡ Steering: ' + prompt);
       } else {
         messageQueue.push(item);
-        addLine('u', 'You: ' + prompt);
+        addMessage('user', prompt);
       }
       updateQueueStatus();
       void processQueue();
@@ -527,10 +1167,11 @@ def index() -> Response:
     async function processQueue() {
       if (processingQueue) return;
       processingQueue = true;
-      if (startupWarning) startupWarning.style.display = 'block';
+      if (startupWarning) startupWarning.style.display = 'flex';
+
       while (messageQueue.length) {
         const item = messageQueue.shift();
-        updateQueueStatus(item.steer ? 'Applying steering instruction…' : 'Harold is responding…');
+        updateQueueStatus(item.steer ? 'Applying steering instruction...' : 'Harold is generating reply...');
         try {
           const res = await fetch('/api/chat', {
             method: 'POST',
@@ -543,13 +1184,14 @@ def index() -> Response:
             data = JSON.parse(responseText);
           } catch (_parseError) {
             const detail = responseText.replace(/\s+/g, ' ').trim().slice(0, 240);
-            addLine('e', `Server returned a non-JSON response (HTTP ${res.status}). ${detail || 'Please retry shortly.'}`);
+            addMessage('error', `Server returned non-JSON (HTTP ${res.status}). ${detail || 'Please retry shortly.'}`);
           }
           if (data !== null) {
             if (!res.ok) {
-              addLine('e', 'Error: ' + (data.error || 'Request failed'));
+              addMessage('error', 'Error: ' + (data.error || 'Request failed'));
             } else {
-              addLine('b', 'Harold: ' + data.response);
+              (data.tools || []).forEach(addToolLine);
+              addMessage('bot', data.response);
               if (/^\/selftalk\b/i.test(item.prompt)) startSelfTalkPolling();
               conversationHistory.push(
                 {role: 'user', content: item.prompt},
@@ -559,20 +1201,19 @@ def index() -> Response:
             }
           }
         } catch (err) {
-          addLine('e', 'Network error: ' + err.message);
+          addMessage('error', 'Network error: ' + err.message);
         }
         updateQueueStatus();
       }
+
       processingQueue = false;
-      activeStatus = '';
       if (startupWarning) startupWarning.style.display = 'none';
       updateQueueStatus();
       promptEl.focus();
     }
 
-    // Show anything already in the saved self-talk conversation on load.
+    // Init
     startSelfTalkPolling();
-
     sendBtn.addEventListener('click', () => enqueuePrompt(false));
     steerBtn.addEventListener('click', () => enqueuePrompt(true));
     promptEl.addEventListener('keydown', (e) => {
@@ -582,93 +1223,170 @@ def index() -> Response:
       }
     });
 
-    // Code generator
-    const codePanel = document.getElementById('code-panel');
-    const codePrompt = document.getElementById('codePrompt');
-    const codeGenBtn = document.getElementById('codeGenBtn');
-    const codeListBtn = document.getElementById('codeListBtn');
-    const codeStatus = document.getElementById('codeStatus');
-    const codeOutput = document.getElementById('codeOutput');
-    const codeDownloads = document.getElementById('codeDownloads');
+    addMessage('bot', 'Harold online. Fast, memory-linked AI assistant ready.');
 
-    codeGenBtn.addEventListener('click', async () => {
-      const prompt = codePrompt.value.trim();
-      if (!prompt) return;
-      codeGenBtn.disabled = true;
-      codeStatus.textContent = 'Generating...';
-      codeOutput.textContent = '';
-      codeDownloads.innerHTML = '';
+    // Image upload
+    const imgUploadBtn = document.getElementById('imgUploadBtn');
+    const imgInput = document.getElementById('imgInput');
+    imgUploadBtn.addEventListener('click', () => imgInput.click());
+    imgInput.addEventListener('change', async () => {
+      const file = imgInput.files[0];
+      if (!file) return;
+      const form = new FormData();
+      form.append('file', file);
+      imgUploadBtn.disabled = true;
+      imgUploadBtn.textContent = '⏳';
       try {
-        const res = await fetch('/api/code/generate', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({prompt, history: conversationHistory.slice(-12)})
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          codeOutput.textContent = 'Error: ' + (data.error || 'Request failed');
-          codeStatus.textContent = '';
+        const res = await fetch('/api/images/upload', { method: 'POST', body: form });
+        const data = await res.json();
+        if (data.url) {
+          promptEl.value = (promptEl.value ? promptEl.value + '\n' : '') + '![Image](' + data.url + ')';
         } else {
-          codeOutput.textContent = data.response || 'No response';
-          codeStatus.textContent = 'Done.';
-          // Auto-refresh downloads
-          listCodeDownloads();
+          addMessage('error', 'Upload failed: ' + (data.error || 'unknown'));
         }
       } catch (err) {
-        codeOutput.textContent = 'Network error: ' + err.message;
-        codeStatus.textContent = '';
+        addMessage('error', 'Upload error: ' + err.message);
       } finally {
-        codeGenBtn.disabled = false;
+        imgUploadBtn.disabled = false;
+        imgUploadBtn.textContent = '📷';
+        imgInput.value = '';
       }
     });
 
-    codeListBtn.addEventListener('click', listCodeDownloads);
+    // Image edit modal
+    const modalOverlay = document.createElement('div');
+    modalOverlay.className = 'modal-overlay';
+    modalOverlay.innerHTML = `
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">Edit Image</span>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <img class="modal-image" id="modalImage" alt="Editing preview" />
+        </div>
+        <div class="modal-controls">
+          <div class="ctrl-group">
+            <span class="ctrl-label">Action</span>
+            <select id="editAction">
+              <option value="grayscale">Grayscale</option>
+              <option value="invert">Invert</option>
+              <option value="blur">Blur</option>
+              <option value="sharpen">Sharpen</option>
+              <option value="resize">Resize</option>
+              <option value="crop">Crop</option>
+              <option value="brighten">Brighten</option>
+              <option value="contrast">Contrast</option>
+            </select>
+          </div>
+          <div class="ctrl-row">
+            <span class="ctrl-label">Width</span>
+            <input type="number" id="editWidth" placeholder="px" />
+          </div>
+          <div class="ctrl-row">
+            <span class="ctrl-label">Height</span>
+            <input type="number" id="editHeight" placeholder="px" />
+          </div>
+          <div class="ctrl-row">
+            <span class="ctrl-label">Factor</span>
+            <input type="range" id="editFactor" min="0.1" max="3.0" step="0.1" value="1.2" />
+            <span id="editFactorVal">1.2</span>
+          </div>
+          <div class="ctrl-row">
+            <span class="ctrl-label">Left</span>
+            <input type="number" id="editLeft" placeholder="px" />
+          </div>
+          <div class="ctrl-row">
+            <span class="ctrl-label">Top</span>
+            <input type="number" id="editTop" placeholder="px" />
+          </div>
+          <div class="ctrl-row">
+            <span class="ctrl-label">Right</span>
+            <input type="number" id="editRight" placeholder="px" />
+          </div>
+          <div class="ctrl-row">
+            <span class="ctrl-label">Bottom</span>
+            <span class="ctrl-label">Bottom</span>
+            <input type="number" id="editBottom" placeholder="px" />
+          </div>
+          <button class="img-btn primary" id="applyEditBtn">Apply Edit</button>
+          <button class="img-btn" id="downloadEditBtn" style="display:none">Download Result</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modalOverlay);
 
-    async function listCodeDownloads() {
-      codeStatus.textContent = 'Listing FTP files...';
-      codeDownloads.innerHTML = '';
+    let currentModalUrl = '';
+    let currentModalResult = '';
+
+    document.querySelector('.modal-close').onclick = () => {
+      modalOverlay.classList.remove('open');
+    };
+    modalOverlay.onclick = (e) => {
+      if (e.target === modalOverlay) modalOverlay.classList.remove('open');
+    };
+
+    const editActionSelect = document.getElementById('editAction');
+    const editFactorInput = document.getElementById('editFactor');
+    const editFactorVal = document.getElementById('editFactorVal');
+    editFactorInput.oninput = () => { editFactorVal.textContent = editFactorInput.value; };
+
+    document.getElementById('applyEditBtn').onclick = async () => {
+      if (!currentModalUrl) return;
+      const action = editActionSelect.value;
+      const width = document.getElementById('editWidth').value || undefined;
+      const height = document.getElementById('editHeight').value || undefined;
+      const left = document.getElementById('editLeft').value || undefined;
+      const top = document.getElementById('editTop').value || undefined;
+      const right = document.getElementById('editRight').value || undefined;
+      const bottom = document.getElementById('editBottom').value || undefined;
+      const factor = parseFloat(editFactorInput.value);
+
+      const payload = { url: currentModalUrl, action };
+      if (width) payload.width = parseInt(width);
+      if (height) payload.height = parseInt(height);
+      if (left !== undefined) payload.left = parseInt(left);
+      if (top !== undefined) payload.top = parseInt(top);
+      if (right !== undefined) payload.right = parseInt(right);
+      if (bottom !== undefined) payload.bottom = parseInt(bottom);
+      if (factor) payload.factor = factor;
+
       try {
-        const res = await fetch('/api/code/list', {
-          method: 'GET'
-        });
-        if (!res.ok) {
-          codeDownloads.innerHTML = '<div style=\"color:#ef4444;\">Could not list FTP files.</div>';
-          codeStatus.textContent = '';
-          return;
-        }
+        const res = await fetch('/api/images/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         const data = await res.json();
-        const files = data.files || [];
-        if (files.length === 0) {
-          codeDownloads.innerHTML = '<div style=\"color:#9ca3af; font-size:12px;\">No files on FTP.</div>';
+        if (data.url) {
+          currentModalResult = data.url;
+          document.getElementById('modalImage').src = data.url + '?t=' + Date.now();
+          document.getElementById('downloadEditBtn').style.display = 'inline-block';
+          addMessage('bot', 'Edited image: ![Edited](' + data.url + ')');
         } else {
-          const ul = document.createElement('ul');
-          ul.style.margin = '4px 0 0 0';
-          ul.style.paddingLeft = '16px';
-          for (const f of files) {
-            const li = document.createElement('li');
-            li.style.marginBottom = '4px';
-            li.style.fontSize = '13px';
-            const a = document.createElement('a');
-            a.href = '/api/code/download/' + encodeURIComponent(f);
-            a.textContent = f;
-            a.target = '_blank';
-            li.appendChild(a);
-            ul.appendChild(li);
-          }
-          codeDownloads.appendChild(ul);
+          addMessage('error', 'Edit failed: ' + (data.error || 'unknown'));
         }
-        codeStatus.textContent = '';
       } catch (err) {
-        codeDownloads.innerHTML = '<div style=\"color:#ef4444;\">Network error.</div>';
-        codeStatus.textContent = '';
+        addMessage('error', 'Edit error: ' + err.message);
       }
-    }
+    };
 
-    addLine('b', 'Harold: Online. Ask me anything.');
+    document.getElementById('downloadEditBtn').onclick = () => {
+      if (!currentModalResult) return;
+      const a = document.createElement('a');
+      a.href = currentModalResult;
+      a.download = 'edited-image.png';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    };
+
+    window.openImageModal = function(url, alt) {
+      currentModalUrl = url;
+      currentModalResult = '';
+      document.getElementById('modalImage').src = url;
+      document.getElementById('downloadEditBtn').style.display = 'none';
+      modalOverlay.classList.add('open');
+    };
   </script>
 </body>
-</html>
-"""
+</html>"""
     return Response(html, mimetype="text/html")
 
 
@@ -678,7 +1396,7 @@ def admin_index() -> Response:
     if not ok:
         return error, 503
 
-    html = """<!doctype html>
+    html = r"""<!doctype html>
 <html>
 <head>
   <meta charset=\"utf-8\" />
@@ -1049,6 +1767,25 @@ def admin_post_daily_update() -> Response:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.post("/api/admin/post-wave")
+def admin_post_wave() -> Response:
+    """Post (or dry-run) Harold's daily Hive Wave. Duplicate guards still apply."""
+    ok, error = _admin_enabled_and_configured()
+    if not ok:
+        return error, 503
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_admin_rate_limit(client_ip):
+        return jsonify({"error": "admin rate limit exceeded"}), 429
+    if not _is_admin_authorized(request):
+        return jsonify({"error": "unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = harold_waves.maybe_post_wave(generate=_wave_text, dry_run=bool(payload.get("dry_run", True)))
+        return jsonify({"ok": bool(result.get("ok")), "result": result})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.get("/api/admin/ftp-status")
 def admin_ftp_status() -> Response:
     ok, error = _admin_enabled_and_configured()
@@ -1062,30 +1799,140 @@ def admin_ftp_status() -> Response:
     return jsonify(get_ftp_status())
 
 
-@app.get("/api/selftalk")
-@app.get("/api/selftalk/thread")
-def api_selftalk_thread() -> Response:
-    """Turns of the continuous self-talk conversation, for the chat window to tail.
+def _message_text(content) -> str:
+    if isinstance(content, list):
+        return "\n".join(
+            str(part.get("text", "")) for part in content if isinstance(part, dict)
+        ).strip()
+    return str(content or "").strip()
 
-    ``?after=N`` returns only turns added since index ``N``; the response's
-    ``next`` is the index to pass next time, so polling is cheap and ordered.
-    """
-    try:
-        after = int(request.args.get("after", "0") or 0)
-    except ValueError:
-        after = 0
-    try:
-        from my_ai.autonomous_self_talk import PeakeSelfTalkEngine, get_runner
 
-        turns, nxt = PeakeSelfTalkEngine().dialogue.since(after)
-        return jsonify({
-            "ok": True,
-            "turns": turns,
-            "next": nxt,
-            "running": get_runner().status().get("running", False),
-        })
-    except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc), "turns": [], "next": after}), 500
+@app.route("/v1/models", methods=["GET"])
+def openai_models() -> Response:
+    return jsonify({"object": "list", "data": [{"id": "harold", "object": "model", "owned_by": "harold"}]})
+
+
+@app.route("/v1/chat/completions", methods=["POST", "OPTIONS"])
+def openai_chat_completions() -> Response:
+    """OpenAI-compatible wrapper so IDE extensions can use Harold as a model."""
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True})
+    if CHAT_API_KEY:
+        incoming = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(incoming, CHAT_API_KEY):
+            return jsonify({"error": {"message": "invalid api key", "type": "auth"}}), 401
+
+    payload = request.get_json(silent=True) or {}
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return jsonify({"error": {"message": "messages is required", "type": "invalid_request"}}), 400
+    turns = [
+        {"role": m.get("role"), "content": _message_text(m.get("content"))}
+        for m in messages
+        if isinstance(m, dict) and m.get("role") in {"user", "assistant"}
+    ]
+    last_msg = messages[-1] if messages else {}
+    last_role = last_msg.get("role") if isinstance(last_msg, dict) else None
+    if last_role not in {"user", "assistant", "tool"}:
+        return jsonify({"error": {"message": "last message must be user, assistant, or tool", "type": "invalid_request"}}), 400
+    if last_role == "user" and not _message_text(last_msg.get("content")):
+        return jsonify({"error": {"message": "last user message must be non-empty", "type": "invalid_request"}}), 400
+
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if not _check_rate_limit(client_ip):
+        return jsonify({"error": {"message": "rate limit exceeded", "type": "rate_limit"}}), 429
+
+    tools = payload.get("tools") or []
+    if not isinstance(tools, list):
+        tools = []
+
+    tool_calls = None
+    tool_log = []
+    if tools:
+        system_prompt, user_prompt = agent_tools.build_prompt(messages, tools)
+        with _GENERATION_LOCK:
+            try:
+                result = _query_ai_providers_for_self_talk([("system", system_prompt), ("user", user_prompt)], purpose="single")
+                text = next(iter(result.get("answers", {}).values()), "")
+                if not text:
+                    raise RuntimeError("no provider returned a response")
+            except Exception as exc:
+                return jsonify({"error": {"message": f"generation failed: {exc}", "type": "server_error"}}), 500
+    else:
+        user_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "user"]
+        prompt = _message_text(user_msgs[-1].get("content")) if user_msgs else ""
+        history = normalize_history([m for m in messages if isinstance(m, dict) and m.get("role") in {"user", "assistant"}][:-1] if user_msgs else [])
+        with _GENERATION_LOCK:
+            try:
+                with tool_events.capture() as tool_log:
+                    text = generate_response(prompt, conversation_history=history)
+            except Exception as exc:
+                return jsonify({"error": {"message": f"generation failed: {exc}", "type": "server_error"}}), 500
+
+    created = int(time.time())
+    text = re.sub(r"\n*\(Answered via [^)]*\)\s*$", "", text).strip()
+    if tools:
+        tool_calls = agent_tools.parse_tool_calls(text, tools)
+        if tool_calls:
+            text = agent_tools.strip_tool_noise(text)
+    else:
+        tools_md = tool_events.format_markdown(tool_log)
+        if tools_md:
+            text = f"{tools_md}\n\n---\n\n{text}"
+    completion_id = f"chatcmpl-harold-{created}"
+
+    if payload.get("stream"):
+        import json as _json
+
+        def _sse():
+            base = {"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": "harold"}
+            yield "data: " + _json.dumps({**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}]}) + "\n\n"
+            yield "data: " + _json.dumps({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}) + "\n\n"
+            yield "data: [DONE]\n\n"
+
+        return Response(_sse(), mimetype="text/event-stream")
+    message = {"role": "assistant", "content": text}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+        finish_reason = "tool_calls"
+    else:
+        finish_reason = "stop"
+
+    if payload.get("stream"):
+        import json as _json
+
+        def _sse():
+            base = {"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": "harold"}
+            delta = {"role": "assistant"}
+            if text:
+                delta["content"] = text
+            if tool_calls:
+                delta["tool_calls"] = [
+                    {
+                        "index": i,
+                        "id": c["id"],
+                        "type": "function",
+                        "function": {
+                            "name": c["function"]["name"],
+                            "arguments": c["function"]["arguments"],
+                        },
+                    }
+                    for i, c in enumerate(tool_calls)
+                ]
+            yield "data: " + _json.dumps({**base, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]}) + "\n\n"
+            yield "data: " + _json.dumps({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]}) + "\n\n"
+            yield "data: [DONE]\n\n"
+
+        return Response(_sse(), mimetype="text/event-stream")
+
+    return jsonify({
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": "harold",
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    })
 
 
 @app.route("/api/chat", methods=["POST", "OPTIONS"])
@@ -1102,52 +1949,190 @@ def api_chat() -> Response:
     if not _check_rate_limit(client_ip):
         return jsonify({"error": "rate limit exceeded; try again shortly"}), 429
 
-    if prompt.lower().startswith("/selftalk"):
-        rest = prompt[len("/selftalk"):].strip()
-        head, _, tail = rest.partition(" ")
-        # "/selftalk quantum physics" -> start on the whole topic, not on "quantum".
-        if head.lower() in {"on", "start", "off", "stop", "status", "clear"}:
-            command, topic = head.lower(), tail.strip()
-        else:
-            command, topic = "on", rest
-        from my_ai.autonomous_self_talk import get_runner
-
-        runner = get_runner()
-        if command in {"off", "stop"}:
-            runner.stop("stopped from chat")
-            return jsonify({"response": "Self-talk stopped. The conversation is saved; `/selftalk on` resumes it."})
-        if command == "status":
-            state = runner.status()
-            if state["running"]:
-                summary = f"running on '{state['topic']}' ({state['turns']} turns this run)"
-            else:
-                summary = "not running" + (f" ({state['stopped_reason']})" if state.get("stopped_reason") else "")
-            if state.get("last_error"):
-                summary += f"; last error: {state['last_error'][:120]}"
-            return jsonify({"response": f"Self-talk: {summary}. The conversation is shown in this chat."})
-        if command == "clear":
-            from my_ai.autonomous_self_talk import PeakeSelfTalkEngine
-
-            PeakeSelfTalkEngine().dialogue.clear()
-            return jsonify({"response": "Self-talk conversation cleared. It will start a fresh lesson."})
-        started = runner.start(topic.strip())
-        head = "Self-talk started" if started else "Self-talk already running"
-        return jsonify({
-            "response": (
-                f"{head}{(' on: ' + topic.strip()) if topic.strip() else ''}. "
-                "Every role is answered by the configured AI providers and cross-checked, "
-                "and the conversation continues below. Use /selftalk off to stop."
-            )
-        })
     history = normalize_history(payload.get("history", []))
 
     with _GENERATION_LOCK:
       try:
-        response = generate_response(prompt, conversation_history=history)
+        with tool_events.capture() as tool_log:
+          response = generate_response(prompt, conversation_history=history)
       except Exception as exc:
         return jsonify({"error": f"generation failed: {exc}"}), 500
 
-    return jsonify({"response": response})
+    return jsonify({"response": response, "tools": tool_log})
+
+
+# -- image endpoints -----------------------------------------------------------
+IMAGE_DIR = os.path.join(os.path.dirname(__file__), "images")
+
+
+def _ensure_image_dir() -> None:
+    os.makedirs(IMAGE_DIR, exist_ok=True)
+
+
+@app.get("/api/images")
+def api_list_images() -> Response:
+    _ensure_image_dir()
+    result = []
+    for root, _dirs, files in os.walk(IMAGE_DIR):
+        for f in sorted(files):
+            if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, IMAGE_DIR)
+                result.append({
+                    "path": rel,
+                    "url": f"/images/{rel}",
+                    "size": os.path.getsize(full),
+                })
+    return jsonify({"images": result})
+
+
+@app.get("/images/<path:filename>")
+def api_serve_image(filename: str) -> Response:
+    _ensure_image_dir()
+    return send_from_directory(IMAGE_DIR, filename)
+
+
+@app.post("/api/images/upload")
+def api_upload_image() -> Response:
+    _ensure_image_dir()
+    if "file" not in request.files:
+        return jsonify({"error": "no file provided"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "no filename"}), 400
+    safe = secure_filename(f.filename)
+    if not safe.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
+        return jsonify({"error": "unsupported image type"}), 400
+    dest = os.path.join(IMAGE_DIR, safe)
+    f.save(dest)
+    return jsonify({"path": safe, "url": f"/images/{safe}", "size": os.path.getsize(dest)})
+
+
+@app.post("/api/images/edit")
+def api_edit_image() -> Response:
+    _ensure_image_dir()
+    payload = request.get_json(silent=True) or {}
+    url = str(payload.get("url", "")).strip()
+    action = str(payload.get("action", "")).strip()
+    if not url or not action:
+        return jsonify({"error": "url and action required"}), 400
+
+    # Resolve URL to local file path
+    local_path = None
+    if url.startswith("/images/"):
+        rel = url[len("/images/"):]
+        local_path = os.path.join(IMAGE_DIR, rel)
+    elif url.startswith("/"):
+        local_path = url.lstrip("/")
+    else:
+        return jsonify({"error": "only local /images/ URLs supported"}), 400
+
+    if not os.path.isfile(local_path):
+        return jsonify({"error": "image not found"}), 404
+
+    try:
+        img = Image.open(local_path)
+    except Exception as exc:
+        return jsonify({"error": f"cannot open image: {exc}"}), 400
+
+    try:
+        if action == "resize":
+            w = int(payload.get("width") or img.width)
+            h = int(payload.get("height") or img.height)
+            img = img.resize((w, h), Image.Resampling.LANCZOS)
+        elif action == "crop":
+            l = int(payload.get("left") or 0)
+            t = int(payload.get("top") or 0)
+            r = int(payload.get("right") or img.width)
+            b = int(payload.get("bottom") or img.height)
+            img = img.crop((l, t, r, b))
+        elif action == "blur":
+            r = float(payload.get("factor") or 2)
+            img = img.filter(ImageFilter.GaussianBlur(radius=r))
+        elif action == "sharpen":
+            img = img.filter(ImageFilter.SHARPEN)
+        elif action == "grayscale":
+            img = img.convert("L").convert("RGB")
+        elif action == "invert":
+            img = ImageOps.invert(img.convert("RGB"))
+        elif action == "brighten":
+            f = float(payload.get("factor") or 1.2)
+            img = ImageEnhance.Brightness(img).enhance(f)
+        elif action == "contrast":
+            f = float(payload.get("factor") or 1.2)
+            img = ImageEnhance.Contrast(img).enhance(f)
+        else:
+            return jsonify({"error": f"unknown action: {action}"}), 400
+
+        # Save as edited version
+        base = os.path.splitext(os.path.basename(local_path))[0]
+        ext = os.path.splitext(local_path)[1] or ".png"
+        out_name = f"{base}_edited_{action}{ext}"
+        out_path = os.path.join(IMAGE_DIR, out_name)
+        img.save(out_path)
+
+        return jsonify({"path": out_name, "url": f"/images/{out_name}", "size": os.path.getsize(out_path)})
+    except Exception as exc:
+        return jsonify({"error": f"edit failed: {exc}"}), 500
+
+
+# -- video endpoints -----------------------------------------------------------
+VIDEO_DIR = os.path.join(os.path.dirname(__file__), "videos")
+MUSIC_DIR = os.path.join(os.path.dirname(__file__), "music")
+
+
+def _ensure_video_dir() -> None:
+    os.makedirs(VIDEO_DIR, exist_ok=True)
+
+
+def _ensure_music_dir() -> None:
+    os.makedirs(MUSIC_DIR, exist_ok=True)
+
+
+@app.get("/api/videos")
+def api_list_videos() -> Response:
+    _ensure_video_dir()
+    result = []
+    for root, _dirs, files in os.walk(VIDEO_DIR):
+        for f in sorted(files):
+            if f.lower().endswith((".gif", ".mp4", ".webm", ".avi")):
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, VIDEO_DIR)
+                result.append({
+                    "path": rel,
+                    "url": f"/videos/{rel}",
+                    "size": os.path.getsize(full),
+                })
+    return jsonify({"videos": result})
+
+
+@app.get("/videos/<path:filename>")
+def api_serve_video(filename: str) -> Response:
+    _ensure_video_dir()
+    return send_from_directory(VIDEO_DIR, filename)
+
+
+@app.get("/api/music")
+def api_list_music() -> Response:
+    _ensure_music_dir()
+    result = []
+    for root, _dirs, files in os.walk(MUSIC_DIR):
+        for f in sorted(files):
+            if f.lower().endswith((".wav", ".mp3", ".ogg", ".flac")):
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, MUSIC_DIR)
+                result.append({
+                    "path": rel,
+                    "url": f"/music/{rel}",
+                    "size": os.path.getsize(full),
+                })
+    return jsonify({"music": result})
+
+
+@app.get("/music/<path:filename>")
+def api_serve_music(filename: str) -> Response:
+    _ensure_music_dir()
+    return send_from_directory(MUSIC_DIR, filename)
 
 
 # -- trading bridge endpoints ----------------------------------------------
