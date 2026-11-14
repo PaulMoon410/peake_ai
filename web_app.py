@@ -71,10 +71,11 @@ register_ollama_adapter(
 
 from response_coordinator import register_response_coordinator
 from peakebot import _ai_chat_completion
+from server_api_pool import collect_server_api_pool
 
 register_response_coordinator(
     app, lambda: CHAT_API_KEY, lambda client: _check_rate_limit(client),
-    _GENERATION_LOCK, _ai_chat_completion,
+    _GENERATION_LOCK, _ai_chat_completion, collect_server_api_pool,
 )
 
 # Lightweight in-memory per-IP rate limiter for public testing.

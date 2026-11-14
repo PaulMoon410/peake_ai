@@ -1,0 +1,181 @@
+{
+  "name": "harold-chat",
+  "displayName": "Harold AI Agent",
+  "description": "Chat with Harold, generate code, create bots, and edit files from VS Code.",
+  "version": "0.4.13",
+  "publisher": "moon",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PaulMoon410/peake_ai.git"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "categories": [
+    "AI",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onView:haroldChat",
+    "onCommand:harold.openChat",
+    "onCommand:harold.configureKey",
+    "onCommand:harold.createFile",
+    "onCommand:harold.readFile",
+    "onCommand:harold.proposeEdit",
+    "onCommand:harold.poolAndBuild",
+    "onCommand:harold.queryConsensusPool"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "harold.configureKey",
+        "title": "Harold: Configure Chat API Key",
+        "category": "Harold"
+      },
+      {
+        "command": "harold.openChat",
+        "title": "Harold: Open Chat",
+        "category": "Harold"
+      },
+      {
+        "command": "harold.queryConsensusPool",
+        "title": "Harold: Ask Consensus Pool",
+        "category": "Harold"
+      },
+      {
+        "command": "harold.createFile",
+        "title": "Harold: Create File/Program",
+        "category": "Harold"
+      },
+      {
+        "command": "harold.readFile",
+        "title": "Harold: Read Current File",
+        "category": "Harold"
+      },
+      {
+        "command": "harold.proposeEdit",
+        "title": "Harold: Propose Edit to Current File",
+        "category": "Harold"
+      },
+      {
+        "command": "harold.poolAndBuild",
+        "title": "Harold: Pool and Build Workspace",
+        "category": "Harold"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "haroldSidebar",
+          "title": "Harold",
+          "icon": "assets/harold.svg"
+        }
+      ]
+    },
+    "views": {
+      "haroldSidebar": [
+        {
+          "id": "haroldChat",
+          "type": "webview",
+          "name": "Harold Chat"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "harold.configureKey",
+          "when": "true"
+        },
+        {
+          "command": "harold.openChat",
+          "when": "true"
+        },
+        {
+          "command": "harold.createFile",
+          "when": "true"
+        },
+        {
+          "command": "harold.readFile",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "harold.proposeEdit",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "harold.poolAndBuild",
+          "when": "workspaceFolderCount > 0"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "harold.createFile",
+          "when": "true",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": [
+      {
+        "title": "Harold AI Agent",
+        "properties": {
+          "harold.apiBaseUrl": {
+            "type": "string",
+            "default": "https://lubuntu.tail239f3d.ts.net",
+            "description": "Base URL for Harold's API (no trailing slash)."
+          },
+          "harold.model": {
+            "type": "string",
+            "default": "harold",
+            "description": "Model name to use for chat completions."
+          },
+          "harold.stream": {
+            "type": "boolean",
+            "default": false,
+            "description": "Stream responses from Harold."
+          },
+          "harold.autoApproveWorkspaceReads": {
+            "type": "boolean",
+            "default": false,
+            "description": "Automatically share requested non-secret workspace files with Harold and configured AI providers, even when automatic workspace actions are disabled."
+          },
+          "harold.assistantPoolEnabled": {
+            "type": "boolean",
+            "scope": "application",
+            "default": false,
+            "description": "Let Harold query the AI Bridge assistant pool. Also available as a checkbox in the Harold Chat window. When off, the pool tool is not offered and nothing is shared."
+          },
+          "harold.autoApproveAllActions": {
+            "type": "boolean",
+            "scope": "application",
+            "default": false,
+            "description": "Always approve Harold workspace reads and edits and sharing with configured assistant providers without confirmations. This may send file contents to external providers."
+          },
+          "harold.autoApproveWorkspaceActions": {
+            "type": "boolean",
+            "default": true,
+            "description": "Automatically share requested non-secret workspace files with Harold and configured AI providers and apply workspace file edits without a diff or confirmation. Disable to review each action. Assistant-pool sharing still requires confirmation unless Always approve all Harold actions is enabled."
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "test": "npm run compile && node --test tests/*.test.cjs",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^2.20.0",
+    "typescript": "^5.0.0"
+  }
+}

@@ -56,41 +56,50 @@ def validate_submission(payload):
     return payload
 
 
-def register_response_coordinator(app, get_api_key, rate_limit, generation_lock, synthesize):
+def register_response_coordinator(app, get_api_key, rate_limit, generation_lock, synthesize, collect=None):
     coordinator = Blueprint("response_coordinator", __name__)
 
-    @coordinator.post("/api/extension/pool/synthesize")
-    def finish():
+    @coordinator.before_request
+    def authenticate():
         key = get_api_key()
         header = request.headers.get("Authorization", "")
         incoming = header[7:].strip() if header.startswith("Bearer ") else ""
         if not key or not incoming or not hmac.compare_digest(incoming.encode(), key.encode()):
             return jsonify({"error": "invalid api key or coordinator not configured"}), 401
+
+    def read_json():
+        if not request.is_json:
+            raise ValueError("application/json required")
+        if request.content_length is not None and request.content_length > 128 * 1024:
+            raise RequestEntityTooLarge()
+        raw = request.stream.read(128 * 1024 + 1)
+        if len(raw) > 128 * 1024:
+            raise RequestEntityTooLarge()
         try:
-            if not request.is_json:
-                raise ValueError("application/json required")
-            if request.content_length is not None and request.content_length > 128 * 1024:
-                raise RequestEntityTooLarge()
-            raw = request.stream.read(128 * 1024 + 1)
-            if len(raw) > 128 * 1024:
-                raise RequestEntityTooLarge()
-            try:
-                payload = validate_submission(json.loads(raw))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ValueError("Invalid JSON") from exc
+            return json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Invalid JSON") from exc
+
+    @coordinator.post("/api/extension/pool/synthesize")
+    def finish():
+        try:
+            payload = validate_submission(read_json())
         except RequestEntityTooLarge:
             return jsonify({"error": "Request exceeds 128 KiB"}), 413
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
+        return synthesize_payload(payload, "operator-submitted", check_rate=True)
+
+    def synthesize_payload(payload, source, check_rate=False):
         successful = sum("answer" in result for result in payload["results"])
         if successful < 2:
             return jsonify({"error": "At least two completed answers are required",
                             "results": payload["results"]}), 409
         client = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
-        if not rate_limit(client):
+        if check_rate and not rate_limit(client):
             return jsonify({"error": "rate limit exceeded"}), 429
         if not generation_lock.acquire(timeout=1):
-            return jsonify({"error": "Harold is busy; collected answers were not discarded"}), 503
+            return jsonify({"error": "Harold is busy; retry after the current request finishes", "results": payload["results"]}), 503
         try:
             result = synthesize(json.dumps(payload, ensure_ascii=True), system_prompt=SYSTEM)
             if (not isinstance(result, dict) or not isinstance(result.get("answer"), str)
@@ -98,13 +107,53 @@ def register_response_coordinator(app, get_api_key, rate_limit, generation_lock,
                 raise RuntimeError("No synthesis provider returned a complete answer")
         except (RuntimeError, ValueError, OSError, ArithmeticError):
             current_app.logger.exception("Extension-pool synthesis unavailable")
-            return jsonify({"error": "Harold synthesis unavailable; retain the collected answers"}), 503
+            return jsonify({"error": "Harold synthesis unavailable", "results": payload["results"]}), 503
         finally:
             generation_lock.release()
         return jsonify({
             "session_id": payload["session_id"], "response": result["answer"],
             "synthesizer": result["provider"], "results": payload["results"],
-            "source": "operator-submitted", "successful_contributors": successful,
+            "source": source, "successful_contributors": successful,
         })
+
+    @coordinator.post("/api/extension/pool/query")
+    def query():
+        try:
+            data = read_json()
+            if not isinstance(data, dict) or set(data) != {"prompt"}:
+                raise ValueError("Expected only prompt; automated source results cannot be supplied by the caller")
+            prompt = data["prompt"]
+            if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4000:
+                raise ValueError("Question must contain 1 to 4,000 characters")
+        except RequestEntityTooLarge:
+            return jsonify({"error": "Request exceeds 128 KiB"}), 413
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        client = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+        if not rate_limit(client):
+            return jsonify({"error": "rate limit exceeded"}), 429
+        if collect is None:
+            return jsonify({"error": "Automatic server API pool is not configured"}), 503
+        try:
+            results = collect(prompt)
+            if not isinstance(results, list) or not 2 <= len(results) <= 3:
+                raise RuntimeError("Automatic pool requires two or three server API contributors")
+            names = []
+            for result in results:
+                if (not isinstance(result, dict)
+                        or set(result) not in ({"name", "source", "answer"}, {"name", "source", "error"})
+                        or result["name"] not in ("google", "groq", "openrouter")
+                        or result["name"] in names or result["source"] != "server-api"):
+                    raise RuntimeError("Invalid or recursive server API contributor")
+                names.append(result["name"])
+                text = result.get("answer", result.get("error"))
+                if not isinstance(text, str) or not text.strip() or len(text) > 4000:
+                    raise RuntimeError("Invalid server API answer or failure")
+        except (RuntimeError, ValueError, OSError):
+            current_app.logger.exception("Automatic server API collection failed")
+            return jsonify({"error": "Automatic server API collection unavailable"}), 503
+        payload = {"session_id": str(uuid.uuid4()), "prompt": prompt,
+                   "contributors": names, "results": results}
+        return synthesize_payload(payload, "server-api")
 
     app.register_blueprint(coordinator)

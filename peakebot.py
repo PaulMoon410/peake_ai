@@ -5450,7 +5450,7 @@ def _ai_chat_g4f_go(system: str, user: str) -> str | None:
     return answer.strip() if isinstance(answer, str) and answer.strip() else None
 
 
-def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]:
+def _ai_chat_completion(prompt: str, memory_context: str = "", system_prompt: str | None = None) -> dict[str, Any]:
     """Try AI providers in order: OpenAI first, then fallbacks.
 
     Returns a dict with:
@@ -5459,7 +5459,7 @@ def _ai_chat_completion(prompt: str, memory_context: str = "") -> dict[str, Any]
       tried: list of provider names attempted
       failures: dict of provider_name -> error message for failed providers
     """
-    system = HAROLD_PERSONA + " Answer concisely and accurately."
+    system = (system_prompt or HAROLD_PERSONA) + " Answer concisely and accurately."
     user = prompt
     if memory_context:
         user = f"Relevant prior context: {memory_context}\n\nUser question: {prompt}"
