@@ -69,6 +69,14 @@ register_ollama_adapter(
     _GENERATION_LOCK, _get_language_model,
 )
 
+from response_coordinator import register_response_coordinator
+from peakebot import _ai_chat_completion
+
+register_response_coordinator(
+    app, lambda: CHAT_API_KEY, lambda client: _check_rate_limit(client),
+    _GENERATION_LOCK, _ai_chat_completion,
+)
+
 # Lightweight in-memory per-IP rate limiter for public testing.
 _RATE_WINDOW_SECONDS = 60
 _RATE_LIMIT_REQUESTS = 15

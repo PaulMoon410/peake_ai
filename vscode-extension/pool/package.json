@@ -1,0 +1,34 @@
+{
+  "name": "harold-consensus-coordinator",
+  "displayName": "Harold Consensus Coordinator",
+  "description": "Collect independent extension answers with approval, then ask Harold to evaluate them.",
+  "publisher": "paulmoon410",
+  "version": "0.1.0",
+  "engines": {"vscode": "^1.85.0"},
+  "extensionKind": ["workspace"],
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "activationEvents": ["onCommand:haroldPool.start"],
+  "repository": {"type": "git", "url": "https://github.com/PaulMoon410/peake_ai.git"},
+  "contributes": {
+    "commands": [
+      {"command": "haroldPool.start", "title": "Harold Pool: Start Question"},
+      {"command": "haroldPool.ask", "title": "Harold Pool: Ask Contributor"},
+      {"command": "haroldPool.submit", "title": "Harold Pool: Submit Clipboard Response"},
+      {"command": "haroldPool.fail", "title": "Harold Pool: Mark Contributor Failed"},
+      {"command": "haroldPool.finish", "title": "Harold Pool: Finish with Harold"},
+      {"command": "haroldPool.status", "title": "Harold Pool: Show Session"},
+      {"command": "haroldPool.configureKey", "title": "Harold Pool: Configure API Key"}
+    ],
+    "configuration": {
+      "title": "Harold Pool",
+      "properties": {
+        "haroldPool.serverUrl": {
+          "type": "string", "default": "https://lubuntu.tail239f3d.ts.net",
+          "description": "Harold server origin, not the /ollama or /v1 base path. HTTPS or loopback HTTP."
+        }
+      }
+    }
+  },
+  "scripts": {"test": "node --test *.test.js"}
+}
